@@ -7,148 +7,131 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-const noStore = { "Cache-Control": "no-store" } as const;
-
-type Row = {
-  id: string;
-  sellerId: string;
-  sku: string;
+type CatalogCategory = {
+  code: string;
   name: string;
-  price: number;
-  stock: number;
-  active: boolean;
-  imageUrls: string[];
-  categoryCode: string | null;
-  updatedAt: Date | null;
+  slug?: string;
+  parentCode?: string | null;
+  position?: number;
+  active?: boolean;
+  [k: string]: unknown;
 };
 
-function csvEscape(v: unknown): string {
-  // transforma undefined/null em vazio
-  let s =
-    v == null
-      ? ""
-      : Array.isArray(v)
-      ? v.join(" ")
-      : v instanceof Date
-      ? v.toISOString()
-      : String(v);
+type CatalogRule = {
+  id: string;
+  pattern: string;
+  action: string;
+  enabled: boolean;
+  priority?: number;
+  ownerId?: string | null;
+  [k: string]: unknown;
+};
 
-  // normaliza quebras de linha
-  s = s.replace(/\r?\n/g, " ").trim();
-
-  // se tiver separador/aspas/quebra, envolve em aspas e escapa aspas
-  if (/[",;\n]/.test(s)) {
-    s = '"' + s.replace(/"/g, '""') + '"';
-  }
-  return s;
+function errMsg(e: unknown) {
+  return e instanceof Error ? e.message : "Erro desconhecido";
 }
 
-function buildCsv(rows: Row[]): string {
-  const header = [
-    "id",
-    "sellerId",
-    "sku",
-    "name",
-    "price",
-    "stock",
-    "active",
-    "imageUrls",
-    "categoryCode",
-    "updatedAt",
-  ].join(",");
-
-  const lines = rows.map((r) =>
-    [
-      csvEscape(r.id),
-      csvEscape(r.sellerId),
-      csvEscape(r.sku),
-      csvEscape(r.name),
-      csvEscape(r.price.toFixed(2)),
-      csvEscape(r.stock),
-      csvEscape(r.active ? "true" : "false"),
-      csvEscape(r.imageUrls.join(" ")),
-      csvEscape(r.categoryCode ?? ""),
-      csvEscape(r.updatedAt ? r.updatedAt.toISOString() : ""),
-    ].join(",")
-  );
-
-  return [header, ...lines].join("\n");
+function asRecord(u: unknown): Record<string, unknown> {
+  return (u && typeof u === "object") ? (u as Record<string, unknown>) : {};
 }
 
+function toCategory(id: string, raw: Record<string, unknown>): CatalogCategory {
+  return {
+    code: String(raw.code ?? id),
+    name: String(raw.name ?? ""),
+    slug: typeof raw.slug === "string" ? raw.slug : undefined,
+    parentCode: (raw.parentCode as string | null) ?? null,
+    position: typeof raw.position === "number" ? raw.position : undefined,
+    active: typeof raw.active === "boolean" ? raw.active : true,
+    ...raw,
+  };
+}
+
+function toRule(id: string, raw: Record<string, unknown>): CatalogRule {
+  return {
+    id,
+    pattern: String(raw.pattern ?? ""),
+    action: String(raw.action ?? ""),
+    enabled: Boolean(raw.enabled ?? true),
+    priority: typeof raw.priority === "number" ? raw.priority : undefined,
+    ownerId: (raw.ownerId as string | null) ?? null,
+    ...raw,
+  };
+}
+
+/** GET /api/catalog/export?format=json|csv&section=all|categories|rules */
 export async function GET(req: NextRequest) {
   try {
-    const { searchParams } = new URL(req.url);
-    const sellerId = searchParams.get("sellerId")?.trim();
-    const activeParam = searchParams.get("active"); // "true" | "false" | "all" | null
-    const download = searchParams.get("download") === "1";
+    const url = new URL(req.url);
+    const format = (url.searchParams.get("format") || "json").toLowerCase();
+    const section = (url.searchParams.get("section") || "all").toLowerCase();
 
-    if (!sellerId) {
-      return NextResponse.json(
-        { error: "Parâmetro 'sellerId' é obrigatório." },
-        { status: 400, headers: noStore }
-      );
+    const wantCats = section === "all" || section === "categories";
+    const wantRules = section === "all" || section === "rules";
+
+    let categories: CatalogCategory[] = [];
+    let rules: CatalogRule[] = [];
+
+    if (wantCats) {
+      const cs = await adminDb.collection("catalog_categories").get();
+      categories = cs.docs.map((d) => toCategory(d.id, asRecord(d.data())));
+    }
+    if (wantRules) {
+      const rs = await adminDb.collection("catalog_rules").get();
+      rules = rs.docs.map((d) => toRule(d.id, asRecord(d.data())));
     }
 
-    // monta query
-    let q = adminDb.collection("seller_products").where("sellerId", "==", sellerId);
-
-    if (activeParam === "true") {
-      q = q.where("active", "==", true);
-    } else if (activeParam === "false") {
-      q = q.where("active", "==", false);
-    }
-    // activeParam "all" (ou ausente) -> não filtra
-
-    const snap = await q.get();
-
-    const rows: Row[] = snap.docs.map((doc) => {
-      const d = doc.data() as any;
-      // Firestore Timestamp -> Date
-      const updated =
-        d?.updatedAt?.toDate?.() ??
-        (d?.updatedAt?._seconds ? new Date(d.updatedAt._seconds * 1000) : null);
-
-      return {
-        id: doc.id,
-        sellerId: d?.sellerId ?? "",
-        sku: d?.sku ?? "",
-        name: d?.name ?? "",
-        price: typeof d?.price === "number" ? d.price : Number(d?.price ?? 0),
-        stock: typeof d?.stock === "number" ? d.stock : Number(d?.stock ?? 0),
-        active: d?.active !== false,
-        imageUrls: Array.isArray(d?.imageUrls) ? d.imageUrls : [],
-        categoryCode: typeof d?.categoryCode === "string" ? d.categoryCode : null,
-        updatedAt: updated,
-      };
-    });
-
-    const csv = buildCsv(rows);
-
-    // Se ?download=1, retorna o arquivo diretamente (Content-Disposition)
-    if (download) {
+    if (format === "csv") {
+      const parts: string[] = [];
+      if (wantCats) {
+        parts.push("# catalog_categories");
+        parts.push("code,name,slug,parentCode,position,active");
+        for (const c of categories) {
+          const line = [
+            JSON.stringify(c.code ?? ""),
+            JSON.stringify(c.name ?? ""),
+            JSON.stringify(c.slug ?? ""),
+            JSON.stringify(c.parentCode ?? ""),
+            JSON.stringify(typeof c.position === "number" ? String(c.position) : ""),
+            JSON.stringify(String(c.active ?? true)),
+          ].join(",");
+          parts.push(line);
+        }
+        parts.push("");
+      }
+      if (wantRules) {
+        parts.push("# catalog_rules");
+        parts.push("id,pattern,action,enabled,priority,ownerId");
+        for (const r of rules) {
+          const line = [
+            JSON.stringify(r.id ?? ""),
+            JSON.stringify(r.pattern ?? ""),
+            JSON.stringify(r.action ?? ""),
+            JSON.stringify(String(r.enabled ?? true)),
+            JSON.stringify(typeof r.priority === "number" ? String(r.priority) : ""),
+            JSON.stringify(r.ownerId ?? ""),
+          ].join(",");
+          parts.push(line);
+        }
+      }
+      const csv = parts.join("\n");
       return new NextResponse(csv, {
         status: 200,
         headers: {
-          ...noStore,
           "Content-Type": "text/csv; charset=utf-8",
-          // BOM opcional? Aqui fica sem; se quiser Excel-friendly, prefixar "\uFEFF" no csv.
-          "Content-Disposition": `attachment; filename="catalog_${sellerId}.csv"`,
+          "Cache-Control": "no-store",
         },
       });
     }
 
-    // Padrão da sua UI: retornar { url } e abrir em nova aba
-    // Usamos data URL base64 (não precisa Storage)
-    const base64 = Buffer.from(csv, "utf8").toString("base64");
-    const url = `data:text/csv;base64,${base64}`;
+    // default JSON
+    const payload: Record<string, unknown> = {};
+    if (wantCats) payload.categories = categories;
+    if (wantRules) payload.rules = rules;
 
-    return NextResponse.json({ url }, { status: 200, headers: noStore });
-  } catch (err: any) {
-    console.error("[GET /api/catalog/export]", err);
-    return NextResponse.json(
-      { error: err?.message ?? "Erro interno" },
-      { status: 500, headers: noStore }
-    );
+    return NextResponse.json(payload, { status: 200, headers: { "Cache-Control": "no-store" } });
+  } catch (e: unknown) {
+    return NextResponse.json({ error: errMsg(e) }, { status: 400, headers: { "Cache-Control": "no-store" } });
   }
 }
 
@@ -158,7 +141,7 @@ export async function OPTIONS() {
     headers: {
       "Access-Control-Allow-Methods": "GET, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type, Authorization",
-      ...noStore,
+      "Cache-Control": "no-store",
     },
   });
 }
