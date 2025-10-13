@@ -8,6 +8,7 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 type Params = { id: string };
+type RouteContext = { params: Promise<Params> };
 
 type CatalogRule = {
   id: string;
@@ -18,7 +19,7 @@ type CatalogRule = {
   ownerId?: string | null;
   createdAt?: string | Date;
   updatedAt?: string | Date;
-  // outros campos livres, mas SEM any:
+  // campos extra, mas tipados como unknown
   [key: string]: unknown;
 };
 
@@ -33,19 +34,12 @@ function getErrMsg(err: unknown): string {
   }
 }
 
-async function resolveParams(
-  context: { params: Promise<Params> } | { params: Params }
-): Promise<Params> {
-  // compat: algumas versões tipam params como Promise
-  const p = (context.params as Promise<Params> | Params);
-  return p instanceof Promise ? p : p;
-}
-
 /* ========================= Handlers ========================= */
 
-export async function GET(_req: NextRequest, context: { params: Promise<Params> }) {
+export async function GET(_req: NextRequest, context: RouteContext) {
   try {
-    const { id } = await resolveParams(context);
+    const { id } = await context.params;
+
     const ref = adminDb.collection("catalog_rules").doc(id);
     const snap = await ref.get();
 
@@ -63,7 +57,6 @@ export async function GET(_req: NextRequest, context: { params: Promise<Params> 
       ownerId: (data.ownerId as string | null) ?? null,
       createdAt: (data.createdAt as string | Date | undefined) ?? undefined,
       updatedAt: (data.updatedAt as string | Date | undefined) ?? undefined,
-      // mantém quaisquer outros campos:
       ...data,
     };
 
@@ -73,9 +66,10 @@ export async function GET(_req: NextRequest, context: { params: Promise<Params> 
   }
 }
 
-export async function PUT(req: NextRequest, context: { params: Promise<Params> }) {
+export async function PUT(req: NextRequest, context: RouteContext) {
   try {
-    const { id } = await resolveParams(context);
+    const { id } = await context.params;
+
     const bodyUnknown = await req.json().catch(() => ({}));
     if (!bodyUnknown || typeof bodyUnknown !== "object") {
       return NextResponse.json({ ok: false, error: "Body inválido" }, { status: 400 });
@@ -89,7 +83,14 @@ export async function PUT(req: NextRequest, context: { params: Promise<Params> }
     if (typeof body.priority === "number") payload.priority = body.priority;
     if (typeof body.ownerId === "string") payload.ownerId = body.ownerId;
 
-    if (!payload.pattern && !payload.action && payload.enabled === undefined && payload.priority === undefined && payload.ownerId === undefined) {
+    const nothingToUpdate =
+      !payload.pattern &&
+      !payload.action &&
+      payload.enabled === undefined &&
+      payload.priority === undefined &&
+      payload.ownerId === undefined;
+
+    if (nothingToUpdate) {
       return NextResponse.json({ ok: false, error: "Nada para atualizar" }, { status: 400 });
     }
 
@@ -108,9 +109,9 @@ export async function PUT(req: NextRequest, context: { params: Promise<Params> }
   }
 }
 
-export async function DELETE(_req: NextRequest, context: { params: Promise<Params> }) {
+export async function DELETE(_req: NextRequest, context: RouteContext) {
   try {
-    const { id } = await resolveParams(context);
+    const { id } = await context.params;
     await adminDb.collection("catalog_rules").doc(id).delete();
     return NextResponse.json({ ok: true, id }, { status: 200 });
   } catch (err: unknown) {
