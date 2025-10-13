@@ -1,48 +1,130 @@
 // src/app/api/catalog/rules/[id]/route.ts
+import "server-only";
 import { NextRequest, NextResponse } from "next/server";
-import { adminAuth, adminDb } from "@/lib/firebaseAdmin";
+import { adminDb } from "@/lib/firebaseAdmin";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
-function json(data: unknown, status = 200) {
-  return new NextResponse(JSON.stringify(data), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
+type Params = { id: string };
 
-async function getUidFromHeader(req: NextRequest) {
-  const auth = req.headers.get("authorization") || "";
-  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-  if (!token) throw new Error("NO_TOKEN");
-  const decoded = await adminAuth.verifyIdToken(token);
-  return decoded.uid;
-}
+type CatalogRule = {
+  id: string;
+  pattern: string;
+  action: string;
+  enabled: boolean;
+  priority?: number;
+  ownerId?: string | null;
+  createdAt?: string | Date;
+  updatedAt?: string | Date;
+  // outros campos livres, mas SEM any:
+  [key: string]: unknown;
+};
 
-// DELETE /api/catalog/rules/:id  -> apaga uma regra do usuário
-export async function DELETE(
-  req: NextRequest,
-  { params }: { params: { id: string } }
-) {
+type UpsertPayload = Partial<Omit<CatalogRule, "id" | "createdAt" | "updatedAt">>;
+
+function getErrMsg(err: unknown): string {
+  if (err instanceof Error) return err.message;
   try {
-    const uid = await getUidFromHeader(req);
-    const id = params?.id;
+    return String(err);
+  } catch {
+    return "Erro desconhecido";
+  }
+}
 
-    if (!id) return json({ error: "ID ausente" }, 400);
+async function resolveParams(
+  context: { params: Promise<Params> } | { params: Params }
+): Promise<Params> {
+  // compat: algumas versões tipam params como Promise
+  const p = (context.params as Promise<Params> | Params);
+  return p instanceof Promise ? p : p;
+}
 
+/* ========================= Handlers ========================= */
+
+export async function GET(_req: NextRequest, context: { params: Promise<Params> }) {
+  try {
+    const { id } = await resolveParams(context);
     const ref = adminDb.collection("catalog_rules").doc(id);
     const snap = await ref.get();
-    if (!snap.exists) return json({ ok: true }, 200);
 
-    const data = snap.data() as any;
-    if (data?.ownerId !== uid) return json({ error: "Proibido" }, 403);
+    if (!snap.exists) {
+      return NextResponse.json({ ok: false, error: "Regra não encontrada" }, { status: 404 });
+    }
 
-    await ref.delete();
-    return json({ ok: true }, 200);
-  } catch (e: any) {
-    if (e?.message === "NO_TOKEN") return json({ error: "Usuário não autenticado" }, 401);
-    console.error("[catalog/rules DELETE] erro:", e);
-    return json({ error: e?.message ?? "Erro interno" }, 500);
+    const data = snap.data() as Record<string, unknown>;
+    const rule: CatalogRule = {
+      id: snap.id,
+      pattern: String(data.pattern ?? ""),
+      action: String(data.action ?? ""),
+      enabled: Boolean(data.enabled ?? true),
+      priority: typeof data.priority === "number" ? data.priority : undefined,
+      ownerId: (data.ownerId as string | null) ?? null,
+      createdAt: (data.createdAt as string | Date | undefined) ?? undefined,
+      updatedAt: (data.updatedAt as string | Date | undefined) ?? undefined,
+      // mantém quaisquer outros campos:
+      ...data,
+    };
+
+    return NextResponse.json({ ok: true, item: rule }, { status: 200 });
+  } catch (err: unknown) {
+    return NextResponse.json({ ok: false, error: getErrMsg(err) }, { status: 400 });
   }
+}
+
+export async function PUT(req: NextRequest, context: { params: Promise<Params> }) {
+  try {
+    const { id } = await resolveParams(context);
+    const bodyUnknown = await req.json().catch(() => ({}));
+    if (!bodyUnknown || typeof bodyUnknown !== "object") {
+      return NextResponse.json({ ok: false, error: "Body inválido" }, { status: 400 });
+    }
+    const body = bodyUnknown as Record<string, unknown>;
+
+    const payload: UpsertPayload = {};
+    if (typeof body.pattern === "string") payload.pattern = body.pattern.trim();
+    if (typeof body.action === "string") payload.action = body.action.trim();
+    if (typeof body.enabled === "boolean") payload.enabled = body.enabled;
+    if (typeof body.priority === "number") payload.priority = body.priority;
+    if (typeof body.ownerId === "string") payload.ownerId = body.ownerId;
+
+    if (!payload.pattern && !payload.action && payload.enabled === undefined && payload.priority === undefined && payload.ownerId === undefined) {
+      return NextResponse.json({ ok: false, error: "Nada para atualizar" }, { status: 400 });
+    }
+
+    const now = new Date();
+    await adminDb.collection("catalog_rules").doc(id).set(
+      {
+        ...payload,
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+
+    return NextResponse.json({ ok: true, id }, { status: 200 });
+  } catch (err: unknown) {
+    return NextResponse.json({ ok: false, error: getErrMsg(err) }, { status: 400 });
+  }
+}
+
+export async function DELETE(_req: NextRequest, context: { params: Promise<Params> }) {
+  try {
+    const { id } = await resolveParams(context);
+    await adminDb.collection("catalog_rules").doc(id).delete();
+    return NextResponse.json({ ok: true, id }, { status: 200 });
+  } catch (err: unknown) {
+    return NextResponse.json({ ok: false, error: getErrMsg(err) }, { status: 400 });
+  }
+}
+
+export async function OPTIONS() {
+  return new NextResponse(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Methods": "GET, PUT, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Cache-Control": "no-store",
+    },
+  });
 }
