@@ -1,87 +1,70 @@
 // src/app/api/seller-products/[id]/route.ts
 import "server-only";
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebaseAdmin";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-const noStore = { "Cache-Control": "no-store" } as const;
+type Params = { id: string };
 
-/**
- * DELETE /api/seller-products/:id
- * Soft delete: define { active: false, updatedAt: now } no documento.
- * :id é o ID do doc em seller_products (ex.: CUID_EST-0001).
- */
-export async function DELETE(
-  _req: Request,
-  { params }: { params: { id: string } }
-) {
+// ajuste utilitário para lidar com Next 15 (params como Promise)
+async function resolveParams(
+  context: { params: Promise<Params> } | { params: Params }
+): Promise<Params> {
+  const p = context.params as Promise<Params> | Params;
+  return p instanceof Promise ? p : p;
+}
+
+/* ========================= GET ========================= */
+export async function GET(_req: NextRequest, context: { params: Promise<Params> }) {
   try {
-    const id = params?.id?.trim();
-    if (!id) {
-      return NextResponse.json(
-        { error: "id ausente na URL" },
-        { status: 400, headers: noStore }
-      );
-    }
+    const { id } = await resolveParams(context);
 
     const ref = adminDb.collection("seller_products").doc(id);
     const snap = await ref.get();
+
     if (!snap.exists) {
-      return NextResponse.json(
-        { error: "Produto não encontrado" },
-        { status: 404, headers: noStore }
-      );
+      return NextResponse.json({ error: "Item não encontrado" }, { status: 404 });
     }
 
-    await ref.set(
-      { active: false, updatedAt: new Date() },
-      { merge: true }
-    );
-
-    return NextResponse.json({ ok: true, id }, { status: 200, headers: noStore });
-  } catch (err: any) {
-    console.error("[DELETE seller-products/:id]", err);
-    return NextResponse.json(
-      { error: err?.message ?? "Erro interno" },
-      { status: 500, headers: noStore }
-    );
+    return NextResponse.json({ id: snap.id, ...snap.data() }, { status: 200 });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ error: msg }, { status: 400 });
   }
 }
 
-/**
- * GET /api/seller-products/:id
- * (útil para depuração ou tela de edição)
- */
-export async function GET(
-  _req: Request,
-  { params }: { params: { id: string } }
-) {
+/* ========================= PUT (se existir) ========================= */
+// Se você tiver PUT/DELETE aqui, tipa igual ao GET:
+export async function PUT(req: NextRequest, context: { params: Promise<Params> }) {
   try {
-    const id = params?.id?.trim();
-    if (!id) {
-      return NextResponse.json(
-        { error: "id ausente na URL" },
-        { status: 400, headers: noStore }
-      );
-    }
+    const { id } = await resolveParams(context);
+    const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
 
-    const doc = await adminDb.collection("seller_products").doc(id).get();
-    if (!doc.exists) {
-      return NextResponse.json(
-        { error: "Produto não encontrado" },
-        { status: 404, headers: noStore }
-      );
-    }
-
-    return NextResponse.json({ id: doc.id, ...doc.data() }, { headers: noStore });
-  } catch (err: any) {
-    console.error("[GET seller-products/:id]", err);
-    return NextResponse.json(
-      { error: err?.message ?? "Erro interno" },
-      { status: 500, headers: noStore }
+    await adminDb.collection("seller_products").doc(id).set(
+      {
+        ...body,
+        updatedAt: new Date(),
+      },
+      { merge: true }
     );
+
+    return NextResponse.json({ ok: true, id }, { status: 200 });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ error: msg }, { status: 400 });
+  }
+}
+
+export async function DELETE(_req: NextRequest, context: { params: Promise<Params> }) {
+  try {
+    const { id } = await resolveParams(context);
+    await adminDb.collection("seller_products").doc(id).delete();
+    return NextResponse.json({ ok: true, id }, { status: 200 });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ error: msg }, { status: 400 });
   }
 }
