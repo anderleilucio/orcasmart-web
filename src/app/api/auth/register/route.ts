@@ -1,165 +1,126 @@
 // src/app/api/auth/register/route.ts
 import "server-only";
 import { NextRequest, NextResponse } from "next/server";
-import { adminDb } from "@/lib/firebaseAdmin";
-import { getAuth } from "firebase-admin/auth";
+import { adminAuth, adminDb } from "@/lib/firebaseAdmin";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-const noStore = { "Cache-Control": "no-store" } as const;
+/* ========================= Types & Utils ========================= */
 
-/* ==================== Helpers ==================== */
+type RegisterBody = {
+  email?: string;
+  password?: string;
+  displayName?: string;
+  phoneNumber?: string;
+  // opcional: criar como admin
+  makeAdmin?: boolean;
+};
 
-const UFS = new Set([
-  "AC","AL","AP","AM","BA","CE","DF","ES","GO","MA","MT","MS","MG",
-  "PA","PB","PR","PE","PI","RJ","RN","RS","RO","RR","SC","SP","SE","TO",
-]);
+type PublicUser = {
+  uid: string;
+  email?: string;
+  displayName?: string;
+  phoneNumber?: string;
+  photoURL?: string;
+  isAdmin?: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
 
-const digits = (s: string) => (s || "").replace(/\D+/g, "");
-
-// Validação básica de CNPJ (módulo 11)
-function isValidCNPJ(v: string): boolean {
-  const c = digits(v);
-  if (c.length !== 14) return false;
-  if (/^(\d)\1+$/.test(c)) return false;
-
-  let s = 0, p = 5;
-  for (let i = 0; i < 12; i++) {
-    s += parseInt(c[i]) * p;
-    p = p === 2 ? 9 : p - 1;
+function getErrMsg(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  try {
+    return String(err);
+  } catch {
+    return "Erro desconhecido";
   }
-  let r = s % 11;
-  const d1 = r < 2 ? 0 : 11 - r;
-
-  s = 0; p = 6;
-  for (let i = 0; i < 13; i++) {
-    s += parseInt(c[i]) * p;
-    p = p === 2 ? 9 : p - 1;
-  }
-  r = s % 11;
-  const d2 = r < 2 ? 0 : 11 - r;
-
-  return d1 === parseInt(c[12]) && d2 === parseInt(c[13]);
 }
 
-function bad(msg: string, status = 400) {
-  return NextResponse.json({ error: msg }, { status, headers: noStore });
+function sanitizeEmail(v: unknown): string {
+  return typeof v === "string" ? v.trim().toLowerCase() : "";
 }
 
-/* ==================== POST /api/auth/register ==================== */
-/**
- * Espera Authorization: Bearer <ID_TOKEN>
- * Body JSON:
- * {
- *   companyName: string,
- *   cnpj: string (apenas números ou formatado),
- *   whatsapp?: string,
- *   address?: string,
- *   city: string,
- *   uf: "SP" | ...,
- *   geo?: { lat: number, lng: number } | null,
- *   role?: "seller" (ignorado se vier diferente)
- * }
- */
+function sanitizeString(v: unknown): string {
+  return typeof v === "string" ? v.trim() : "";
+}
+
+function validateBody(raw: unknown): Required<Pick<RegisterBody, "email" | "password">> & Omit<RegisterBody, "email" | "password"> {
+  if (!raw || typeof raw !== "object") throw new Error("Body inválido.");
+  const obj = raw as Record<string, unknown>;
+
+  const email = sanitizeEmail(obj.email);
+  const password = sanitizeString(obj.password);
+  const displayName = sanitizeString(obj.displayName) || undefined;
+  const phoneNumber = sanitizeString(obj.phoneNumber) || undefined;
+  const makeAdmin =
+    typeof obj.makeAdmin === "boolean"
+      ? obj.makeAdmin
+      : String(obj.makeAdmin ?? "false").toLowerCase() === "true";
+
+  if (!email) throw new Error('Campo "email" é obrigatório.');
+  if (!password || password.length < 6) throw new Error('Campo "password" é obrigatório (mínimo 6 caracteres).');
+
+  return { email, password, displayName, phoneNumber, makeAdmin };
+}
+
+/* ========================= Handlers ========================= */
+
 export async function POST(req: NextRequest) {
   try {
-    const authHeader = req.headers.get("authorization") || req.headers.get("Authorization");
-    if (!authHeader?.startsWith("Bearer ")) {
-      return bad("Token ausente. Faça login novamente.", 401);
+    const raw = (await req.json().catch(() => ({}))) as unknown;
+    const body = validateBody(raw);
+
+    // Cria usuário no Firebase Auth (Admin)
+    const userRecord = await adminAuth.createUser({
+      email: body.email,
+      password: body.password,
+      displayName: body.displayName,
+      phoneNumber: body.phoneNumber,
+      emailVerified: false,
+      disabled: false,
+    });
+
+    // Define custom claims se solicitado
+    if (body.makeAdmin) {
+      await adminAuth.setCustomUserClaims(userRecord.uid, { admin: true, role: "admin" });
     }
 
-    const idToken = authHeader.slice("Bearer ".length).trim();
-    const adminAuth = getAuth();
-    let decoded;
-    try {
-      decoded = await adminAuth.verifyIdToken(idToken);
-    } catch {
-      return bad("Token inválido ou expirado.", 401);
-    }
-
-    const uid = decoded.uid;
-    if (!uid) return bad("UID inválido no token.", 401);
-
-    const body = await req.json().catch(() => ({}));
-
-    const companyName = String(body?.companyName || "").trim();
-    const cnpjRaw = String(body?.cnpj || "");
-    const cnpj = digits(cnpjRaw);
-
-    const whatsapp = String(body?.whatsapp || "").trim();
-    const address = String(body?.address || "").trim();
-    const city = String(body?.city || "").trim();
-    const uf = String(body?.uf || "").trim().toUpperCase();
-    const geo = body?.geo && typeof body.geo === "object" ? body.geo : null;
-
-    if (!companyName) return bad("Campo 'companyName' é obrigatório.");
-    if (!cnpj) return bad("Campo 'cnpj' é obrigatório.");
-    if (!isValidCNPJ(cnpj)) return bad("CNPJ inválido.");
-
-    if (!city) return bad("Campo 'city' é obrigatório.");
-    if (!UFS.has(uf)) return bad("UF inválida.");
-
-    // Verifica unicidade de CNPJ para outro vendedor
-    const dupQ = await adminDb
-      .collection("sellers")
-      .where("cnpj", "==", cnpj)
-      .limit(1)
-      .get();
-
-    if (!dupQ.empty) {
-      const doc = dupQ.docs[0];
-      if (doc.id !== uid) {
-        return bad("Este CNPJ já está cadastrado em outra conta.", 409);
-      }
-    }
-
-    // Monta payload para Firestore
-    const now = new Date();
-    const sellerRef = adminDb.collection("sellers").doc(uid);
-
-    const data: any = {
-      companyName,
-      cnpj,
-      whatsapp,
-      address,
-      city,
-      uf,
-      geo: geo && typeof geo.lat === "number" && typeof geo.lng === "number"
-        ? { lat: geo.lat, lng: geo.lng }
-        : null,
-      role: "seller",
+    // Persiste no Firestore (coleção users)
+    const now = new Date().toISOString();
+    const doc: PublicUser = {
+      uid: userRecord.uid,
+      email: userRecord.email ?? undefined,
+      displayName: userRecord.displayName ?? undefined,
+      phoneNumber: userRecord.phoneNumber ?? undefined,
+      photoURL: userRecord.photoURL ?? undefined,
+      isAdmin: body.makeAdmin || false,
+      createdAt: now,
       updatedAt: now,
     };
 
-    // Cria ou atualiza (merge)
-    await sellerRef.set(
-      {
-        ...data,
-        createdAt: now, // será ignorado se já existir (merge não sobrescreve necessariamente, mas vale manter)
-      },
-      { merge: true }
-    );
+    await adminDb.collection("users").doc(userRecord.uid).set(doc, { merge: true });
 
-    return NextResponse.json({ ok: true, uid }, { status: 200, headers: noStore });
-  } catch (err: any) {
-    console.error("[POST /api/auth/register]", err);
     return NextResponse.json(
-      { error: err?.message ?? "Erro interno" },
-      { status: 500, headers: noStore }
+      { ok: true, user: doc },
+      { status: 201, headers: { "Cache-Control": "no-store" } }
+    );
+  } catch (err: unknown) {
+    return NextResponse.json(
+      { ok: false, error: getErrMsg(err) },
+      { status: 400, headers: { "Cache-Control": "no-store" } }
     );
   }
 }
 
-/* ==================== OPTIONS (CORS) ==================== */
 export async function OPTIONS() {
   return new NextResponse(null, {
     status: 204,
     headers: {
       "Access-Control-Allow-Methods": "POST, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type, Authorization",
-      ...noStore,
+      "Cache-Control": "no-store",
     },
   });
 }

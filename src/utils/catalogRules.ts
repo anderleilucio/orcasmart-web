@@ -1,66 +1,92 @@
 // src/utils/catalogRules.ts
-import { adminDb } from "@/lib/firebaseAdmin";
 
 /**
- * Palavras muito comuns que não ajudam a classificar.
- * Ajuste livremente (mantive curto para evitar ruído).
+ * Regras e validações do catálogo de produtos
+ * Centraliza a padronização de nomes, categorias e SKUs.
  */
-const STOPWORDS = new Set<string>([
-  "de", "da", "do", "e", "ou", "a", "o", "as", "os", "para", "com", "sem", "por",
-  "cp", "ii", "iii", "iv", "v", "kg", "mm", "cm", "m", "un", "und"
-]);
 
-/** Normaliza texto: minúsculas, sem acentos, só letras/números/espaço */
-export function normTerm(s: string) {
-  return (s || "")
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9 ]/g, " ")
-    .replace(/\s+/g, " ")
+export type CatalogItem = {
+  sku: string;
+  nome: string;
+  preco: number;
+  estoque?: number;
+  ativo: boolean;
+  unidade?: string;
+  imagem?: string;
+  imagens?: string[];
+  categoria?: string;
+};
+
+/**
+ * Normaliza valores numéricos vindos de CSV ou formulário.
+ */
+export function parseNumber(value: string | number | undefined): number {
+  if (typeof value === "number") return value;
+  if (!value) return 0;
+  const normalized = String(value)
+    .replace(/\./g, "")
+    .replace(",", ".")
     .trim();
+  const num = parseFloat(normalized);
+  return isNaN(num) ? 0 : num;
 }
 
 /**
- * Aprende 1–2 termos "bons" do nome e grava/atualiza em catalog_rules do usuário.
- * - Documento por dono+categoria: `${ownerId}:${slug}`
- * - Mantém lista de termos e contagem por termo (para priorização futura)
- * - Limite de termos por categoria para evitar ruído (default 30)
+ * Garante que o nome da categoria seja formatado corretamente.
  */
-export async function learnRuleTerm(
-  ownerId: string,
-  slug: string,
-  rawName: string,
-  maxPerCategory = 30
-) {
-  if (!ownerId || !slug || !rawName) return;
+export function formatCategoryName(raw: string | undefined): string {
+  if (!raw) return "";
+  return raw.trim().replace(/\s+/g, " ").replace(/\b\w/g, (l) => l.toUpperCase());
+}
 
-  // Tokeniza nome e filtra candidatos úteis
-  const tokens = normTerm(rawName).split(" ").filter(Boolean);
-  const candidates = tokens.filter((t) => t.length >= 4 && !STOPWORDS.has(t) && !/^\d+$/.test(t));
-  if (!candidates.length) return;
+/**
+ * Valida um item do catálogo.
+ */
+export function validateCatalogItem(item: unknown): CatalogItem | null {
+  if (!item || typeof item !== "object") return null;
 
-  const docId = `${ownerId}:${slug}`;
-  const docRef = adminDb.collection("catalog_rules").doc(docId);
+  const data = item as Record<string, unknown>;
 
-  await adminDb.runTransaction(async (tx) => {
-    const snap = await tx.get(docRef);
-    const data =
-      (snap.exists ? (snap.data() as any) : { ownerId, category: slug, terms: [], counts: {}, active: true }) ||
-      { ownerId, category: slug, terms: [], counts: {}, active: true };
+  const sku = String(data.sku ?? "").trim();
+  const nome = String(data.nome ?? "").trim();
+  const preco = parseNumber(data.preco as string | number | undefined);
+  const ativo =
+    typeof data.ativo === "boolean"
+      ? data.ativo
+      : String(data.ativo ?? "").toLowerCase() === "true";
 
-    // Escolhe no máx. 2 termos por chamada, simples e robusto.
-    for (const term of candidates.slice(0, 2)) {
-      if (!data.terms.includes(term)) {
-        if (Array.isArray(data.terms) && data.terms.length >= maxPerCategory) break; // limita ruído
-        data.terms = Array.isArray(data.terms) ? data.terms : [];
-        data.terms.push(term);
-      }
-      data.counts = data.counts || {};
-      data.counts[term] = (data.counts[term] || 0) + 1;
+  if (!sku || !nome) return null;
+
+  return {
+    sku,
+    nome,
+    preco,
+    estoque: parseNumber(data.estoque as string | number | undefined),
+    ativo,
+    unidade: String(data.unidade ?? "").trim() || undefined,
+    imagem: String(data.imagem ?? "").trim() || undefined,
+    imagens: Array.isArray(data.imagens)
+      ? (data.imagens as string[]).filter(Boolean)
+      : undefined,
+    categoria: formatCategoryName(data.categoria as string | undefined),
+  };
+}
+
+/**
+ * Regras adicionais — ex: garantir SKU único, categoria padrão etc.
+ */
+export function applyCatalogRules(items: CatalogItem[]): CatalogItem[] {
+  const seen = new Set<string>();
+  return items.map((item) => {
+    let sku = item.sku;
+    if (seen.has(sku)) {
+      sku = `${sku}-${Math.floor(Math.random() * 9999)}`;
     }
+    seen.add(sku);
 
-    data.updatedAt = Date.now();
-    tx.set(docRef, data, { merge: true });
+    return {
+      ...item,
+      categoria: item.categoria || "Outros",
+    };
   });
 }

@@ -5,13 +5,13 @@ import { useCallback } from "react";
 import { auth } from "@/lib/firebase";
 
 /**
- * Tipos iguais/compatíveis com o endpoint /api/catalog/suggest
+ * Tipos compatíveis com o endpoint /api/catalog/suggest
  */
 export type SuggestResponse = {
-  category: string | null;              // "eletrica" | "hidraulica" | ... | null
-  prefix: string | null;                // "ELE" | "HID" | ... | null
+  category: string | null;              // e.g. "eletrica" | "hidraulica" | ... | null
+  prefix: string | null;                // e.g. "ELE" | "HID" | ... | null
   source: "user_rule" | "prefix" | "keyword" | "none";
-  matchedTerm?: string;                 // termo de regra do cliente que casou (se houver)
+  matchedTerm?: string;                 // termo que casou (se houver)
   confidence: number;                   // 0.0 ~ 1.0
 };
 
@@ -22,7 +22,7 @@ export type FileSuggestResult = {
 };
 
 type SuggestParams = {
-  name?: string;        // texto livre (nome de produto)
+  name?: string;        // texto livre (nome do produto)
   filename?: string;    // nome do arquivo (com ou sem extensão)
   sku?: string;         // opcional, caso já exista
 };
@@ -61,7 +61,7 @@ function norm(s: string) {
     .replace(/[\u0300-\u036f]/g, ""); // sem acentos
 }
 
-/** Mapa de termos -> categoria/prefixo (ordem não importa; usamos sort por termo maior). */
+/** Mapa de termos -> categoria/prefixo */
 const LOCAL_KEYWORDS: Array<{ slug: string; prefix: string; terms: string[] }> = [
   { slug: "tintas",        prefix: "TIN", terms: ["tinta", "suvinil", "coral", "latex", "laitex", "pva", "acrilica", "verniz", "selador"] },
   { slug: "alvenaria",     prefix: "ALV", terms: ["bloco", "blocos", "tijolo", "tijolos", "cimento", "argamassa", "areia", "brita", "pedra", "concreto", "reboco"] },
@@ -71,15 +71,17 @@ const LOCAL_KEYWORDS: Array<{ slug: string; prefix: string; terms: string[] }> =
   { slug: "hidraulica",    prefix: "HID", terms: ["tubo", "cano", "pvc", "torneira", "ralo", "joelho", "conexao", "conexão", "registro", "caixa d agua", "caixa d'agua", "caixa de agua"] },
   { slug: "iluminacao",    prefix: "ILU", terms: ["lampada", "lâmpada", "luminaria", "spot", "led", "refletor"] },
   { slug: "pisos",         prefix: "PIS", terms: ["piso", "porcelanato", "ceramica", "cerâmica"] },
-  { slug: "revestimentos", prefix: "REV", terms: ["revestimento", "azulejo", "pastilha"] },
-  { slug: "madeiras",      prefix: "MAD", terms: ["madeira", "porta", "batente", "rodape", "rodapé"] },
+  { slug: "revestimentos", prefix: "REV", terms: ["revestimento", "azulejo", "pastilha", "rodape", "rodapé"] },
+  { slug: "madeiras",      prefix: "MAD", terms: ["madeira", "mdf", "osb", "compensado", "sarraf", "viga", "caibro"] },
 ];
 
 /**
  * Deduz apenas pelo nome/filename, localmente (sem API).
  * Retorna prefix/slug quando algum termo casar.
  */
-export function guessPrefixLocally(nameOrFilename: string): { prefix: string; slug: string; matched: string } | null {
+export function guessPrefixLocally(
+  nameOrFilename: string
+): { prefix: string; slug: string; matched: string } | null {
   const target = norm(nameOrFilename);
   // Achamos por “termo contido”, priorizando termos mais longos (mais específicos)
   const entries: Array<{ slug: string; prefix: string; term: string }> = [];
@@ -88,7 +90,9 @@ export function guessPrefixLocally(nameOrFilename: string): { prefix: string; sl
   }
   entries.sort((a, b) => b.term.length - a.term.length);
   for (const e of entries) {
-    if (target.includes(norm(e.term))) return { prefix: e.prefix, slug: e.slug, matched: e.term };
+    if (target.includes(norm(e.term))) {
+      return { prefix: e.prefix, slug: e.slug, matched: e.term };
+    }
   }
   return null;
 }
@@ -105,8 +109,14 @@ export function useCatalogSuggest() {
     if (params.sku) q.set("sku", params.sku);
 
     const res = await authedFetch(`/api/catalog/suggest?${q.toString()}`);
-    const data = (await res.json()) as SuggestResponse | any;
-    if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+    const data: unknown = await res.json();
+    if (!res.ok) {
+      const errMsg = typeof data === "object" && data !== null && "error" in (data as Record<string, unknown>)
+        ? String((data as Record<string, unknown>).error)
+        : `HTTP ${res.status}`;
+      throw new Error(errMsg);
+    }
+    // Confia no contrato do endpoint
     return data as SuggestResponse;
   }, []);
 
@@ -115,34 +125,31 @@ export function useCatalogSuggest() {
    * 1) Tenta a API (/api/catalog/suggest)
    * 2) Se vier vazio, tenta palavras-chave locais (guessPrefixLocally)
    */
-  const suggestWithFallback = useCallback(
-    async (params: SuggestParams): Promise<SuggestResponse> => {
-      // 1) API
-      try {
-        const api = await suggestOne(params);
-        if (api?.prefix) return api; // já resolveu (user_rule / keyword / prefix)
-      } catch {
-        // ignora erro e tenta local
-      }
+  const suggestWithFallback = useCallback(async (params: SuggestParams): Promise<SuggestResponse> => {
+    // 1) API
+    try {
+      const api = await suggestOne(params);
+      if (api?.prefix) return api; // já resolveu (user_rule / keyword / prefix)
+    } catch {
+      // ignora erro e tenta local
+    }
 
-      // 2) Local
-      const basis = params.name || params.filename || "";
-      const local = guessPrefixLocally(basis);
-      if (local) {
-        return {
-          category: local.slug,
-          prefix: local.prefix,
-          source: "keyword",
-          matchedTerm: local.matched,
-          confidence: 0.72, // levemente abaixo das regras do usuário
-        };
-      }
+    // 2) Local
+    const basis = params.name || params.filename || "";
+    const local = guessPrefixLocally(basis);
+    if (local) {
+      return {
+        category: local.slug,
+        prefix: local.prefix,
+        source: "keyword",
+        matchedTerm: local.matched,
+        confidence: 0.72, // levemente abaixo das regras do usuário
+      };
+    }
 
-      // 3) Nada encontrado
-      return { category: null, prefix: null, source: "none", confidence: 0 };
-    },
-    [suggestOne]
-  );
+    // 3) Nada encontrado
+    return { category: null, prefix: null, source: "none", confidence: 0 };
+  }, [suggestOne]);
 
   /**
    * Lote de arquivos (para upload/CSV):
@@ -171,12 +178,9 @@ export function useCatalogSuggest() {
   }, [suggestWithFallback]);
 
   return {
-    // original
     suggestOne,
     suggestFromFiles,
-    // novo utilitário para telas que querem "aprender" automaticamente
     suggestWithFallback,
-    // helper exportado caso precise só do chute local
     guessPrefixLocally,
   };
 }

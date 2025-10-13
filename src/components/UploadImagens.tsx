@@ -1,6 +1,7 @@
 // src/components/UploadImagens.tsx
 "use client";
 
+import Image from "next/image";
 import { useEffect, useState } from "react";
 import { auth } from "@/lib/firebase";
 import { uploadProductImage } from "@/lib/uploadImage";
@@ -18,6 +19,15 @@ type Row = {
   active: boolean;
   note?: string;
 };
+
+function getErrMsg(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  try {
+    return String(err);
+  } catch {
+    return "Erro desconhecido";
+  }
+}
 
 function stripExtAndNormalize(s: string) {
   const noExt = (s || "").replace(/\.[a-z0-9]+$/i, "");
@@ -127,26 +137,13 @@ export default function UploadImagens() {
           }
         }
         setPrefixMaxFromCatalog(maxMap);
-      } catch (e: any) {
-        console.warn("Não foi possível carregar catálogo p/ numerar SKU:", e?.message);
+      } catch (e: unknown) {
+        // apenas loga em dev
+        // eslint-disable-next-line no-console
+        console.warn("Não foi possível carregar catálogo p/ numerar SKU:", getErrMsg(e));
       }
     })();
   }, []);
-
-  // Próximo número considerando catálogo + o que já está na lista
-  const nextNumberForPrefix = (prefix: string): string => {
-    let currentMax = prefixMaxFromCatalog[prefix] || 0;
-    for (const r of rows) {
-      const pfx = derivePrefixFromSku(r.sku);
-      if (pfx !== prefix) continue;
-      const m = r.sku.match(/^[A-Z]{2,5}[-_](\d{1,})$/);
-      if (m) {
-        const n = parseInt(m[1], 10);
-        if (Number.isFinite(n) && n > currentMax) currentMax = n;
-      }
-    }
-    return pad(currentMax + 1, 4);
-  };
 
   async function onFilesSelected(e: React.ChangeEvent<HTMLInputElement>) {
     const files = e.target.files ? Array.from(e.target.files) : [];
@@ -182,14 +179,18 @@ export default function UploadImagens() {
         // 1ª tentativa: filename
         try {
           suggest = await suggestOne({ filename: baseName });
-        } catch {}
+        } catch {
+          // silencioso
+        }
 
         // 2ª tentativa: name (alguns casos casam melhor)
         if (!suggest?.prefix) {
           try {
             const s2 = await suggestOne({ name: baseName });
             if (s2?.prefix) suggest = s2;
-          } catch {}
+          } catch {
+            // silencioso
+          }
         }
 
         // 3º fallback local (cliente)
@@ -236,8 +237,8 @@ export default function UploadImagens() {
       }
 
       setRows((prev) => [...prev, ...additions]);
-    } catch (e: any) {
-      setError(e?.message || "Falha ao processar imagens");
+    } catch (e: unknown) {
+      setError(getErrMsg(e) || "Falha ao processar imagens");
     } finally {
       setBusy(false);
       e.target.value = "";
@@ -341,8 +342,8 @@ export default function UploadImagens() {
       <div className="flex flex-wrap items-center gap-3">
         <label className="inline-flex items-center gap-2">
           <span className="text-sm">Enviar imagens:</span>
-          <input type="file" multiple onChange={onFilesSelected} />
         </label>
+        <input type="file" multiple onChange={onFilesSelected} />
 
         <button
           onClick={downloadCSV}
@@ -362,18 +363,20 @@ export default function UploadImagens() {
         <ul className="space-y-4">
           {rows.map((r) => (
             <li key={r.id} className="rounded-xl border p-3">
-              <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-center">
-                <div className="md:col-span-2">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
+              <div className="grid grid-cols-1 items-center gap-3 md:grid-cols-12">
+                <div className="relative aspect-square w-28 md:col-span-2">
+                  <Image
                     src={r.image_url}
                     alt={r.name}
-                    className="w-28 h-28 object-contain border rounded-md"
+                    fill
+                    sizes="112px"
+                    className="rounded-md object-contain border"
+                    unoptimized={!r.image_url.startsWith("/")}
                   />
                 </div>
 
                 <label className="block md:col-span-2">
-                  <span className="block text-xs text-slate-600 mb-1">SKU</span>
+                  <span className="mb-1 block text-xs text-slate-600">SKU</span>
                   <input
                     value={r.sku}
                     onChange={(e) => updateRow(r.id, { sku: e.target.value })}
@@ -383,7 +386,7 @@ export default function UploadImagens() {
                 </label>
 
                 <label className="block md:col-span-3">
-                  <span className="block text-xs text-slate-600 mb-1">Nome</span>
+                  <span className="mb-1 block text-xs text-slate-600">Nome</span>
                   <input
                     value={r.name}
                     onChange={(e) => updateRow(r.id, { name: e.target.value })}
@@ -393,7 +396,7 @@ export default function UploadImagens() {
                 </label>
 
                 <label className="block md:col-span-1">
-                  <span className="block text-xs text-slate-600 mb-1">Unidade</span>
+                  <span className="mb-1 block text-xs text-slate-600">Unidade</span>
                   <input
                     value={r.unit}
                     onChange={(e) => updateRow(r.id, { unit: e.target.value })}
@@ -403,7 +406,7 @@ export default function UploadImagens() {
                 </label>
 
                 <label className="block md:col-span-2">
-                  <span className="block text-xs text-slate-600 mb-1">Preço (R$)</span>
+                  <span className="mb-1 block text-xs text-slate-600">Preço (R$)</span>
                   <input
                     value={r.price}
                     onChange={(e) => updateRow(r.id, { price: e.target.value })}
@@ -414,7 +417,7 @@ export default function UploadImagens() {
                 </label>
 
                 <label className="block md:col-span-1">
-                  <span className="block text-xs text-slate-600 mb-1">Estoque</span>
+                  <span className="mb-1 block text-xs text-slate-600">Estoque</span>
                   <input
                     value={r.stock}
                     onChange={(e) => updateRow(r.id, { stock: e.target.value })}
@@ -424,7 +427,7 @@ export default function UploadImagens() {
                   />
                 </label>
 
-                <label className="inline-flex items-center gap-2 md:col-span-1">
+                <label className="md:col-span-1 inline-flex items-center gap-2">
                   <input
                     type="checkbox"
                     checked={r.active}
@@ -437,7 +440,7 @@ export default function UploadImagens() {
               <div className="mt-2 text-xs">
                 <div className="truncate">
                   <a
-                    className="text-slate-700 underline break-all"
+                    className="break-all text-slate-700 underline"
                     href={r.image_url}
                     target="_blank"
                     rel="noreferrer"
@@ -445,11 +448,11 @@ export default function UploadImagens() {
                     {r.image_url}
                   </a>
                 </div>
-                {r.note && <div className="text-slate-500 mt-1">{r.note}</div>}
+                {r.note && <div className="mt-1 text-slate-500">{r.note}</div>}
               </div>
 
               <div className="mt-2">
-                <button onClick={() => removeRow(r.id)} className="text-sm rounded-md border px-3 py-1.5">
+                <button onClick={() => removeRow(r.id)} className="rounded-md border px-3 py-1.5 text-sm">
                   Remover
                 </button>
               </div>

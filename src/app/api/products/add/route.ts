@@ -18,6 +18,15 @@ function norm(s: string) {
     .trim();
 }
 
+function getErrMsg(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  try {
+    return String(err);
+  } catch {
+    return "Erro desconhecido";
+  }
+}
+
 /** Categoria -> código/prefixo */
 const CATEGORY_MAP = {
   "cimentos-argamassas": { code: "CIM", prefix: "CIM" },
@@ -102,11 +111,19 @@ async function generateSku(prefix: string): Promise<string> {
   return `${prefix}-${num}`;
 }
 
+type PostBody = {
+  name?: string;
+  unit?: string;
+  active?: boolean;
+};
+
 /** -------------------- Handler -------------------- */
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json().catch(() => ({}));
-    const rawName = String(body?.name || "");
+    const raw = (await req.json().catch(() => ({}))) as unknown;
+    const body = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+
+    const rawName = String(body.name ?? "");
     const name = norm(rawName);
     if (!name) {
       return NextResponse.json(
@@ -124,14 +141,18 @@ export async function POST(req: NextRequest) {
 
     // 3) Upsert em products
     const now = new Date();
+    const unit = typeof body.unit === "string" && body.unit.trim() ? body.unit.trim() : "un";
+    const active =
+      typeof body.active === "boolean" ? body.active : String(body.active ?? "true").toLowerCase() !== "false";
+
     await adminDb.collection("products").doc(sku).set(
       {
         sku,
         name: rawName.trim(), // mantém grafia original para exibir
         categoryCode: meta.code,
         prefix: meta.prefix,
-        unit: body?.unit ?? "un",
-        active: body?.active !== false,
+        unit,
+        active,
         createdAt: now,
         updatedAt: now,
       },
@@ -142,10 +163,11 @@ export async function POST(req: NextRequest) {
       { ok: true, sku_root: sku, name: rawName.trim(), categoryCode: meta.code },
       { status: 200, headers: { "Cache-Control": "no-store" } }
     );
-  } catch (err: any) {
+  } catch (err: unknown) {
+    // eslint-disable-next-line no-console
     console.error("[POST /api/products/add]", err);
     return NextResponse.json(
-      { error: err?.message ?? "Erro interno" },
+      { error: getErrMsg(err) },
       { status: 500, headers: { "Cache-Control": "no-store" } }
     );
   }

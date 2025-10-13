@@ -13,20 +13,22 @@ export default function GlobalHeader() {
   const pathname = usePathname();
 
   // mostra só na área logada
-  const show = pathname?.startsWith("/vendedor") || pathname?.startsWith("/clientes") || pathname?.startsWith("/orcamentos");
+  const show =
+    pathname?.startsWith("/vendedor") ||
+    pathname?.startsWith("/clientes") ||
+    pathname?.startsWith("/orcamentos");
 
   const [weather, setWeather] = useState<Weather | null>(null);
 
   useEffect(() => {
-    // geolocalização simples + fallback (carinha feliz)
     if (!navigator.geolocation) {
       setWeather({ emoji: "🙂", label: "—", temp: "" });
       return;
     }
+
     navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        // Aqui você poderia consultar uma API de clima com pos.coords
-        // Por enquanto: rascunho visual
+      () => {
+        // Simula clima baseado no horário
         const hour = new Date().getHours();
         const isNight = hour < 6 || hour >= 18;
         setWeather({
@@ -64,7 +66,7 @@ export default function GlobalHeader() {
           />
         </div>
 
-        {/* Casa → volta pro início DO VENDEDOR */}
+        {/* Casa → início do vendedor */}
         <button
           onClick={() => router.push("/vendedor")}
           title="Início do vendedor"
@@ -78,7 +80,7 @@ export default function GlobalHeader() {
           <Bell className="h-5 w-5" />
         </button>
 
-        {/* “Clima” / fallback carinha feliz */}
+        {/* “Clima” */}
         <div className="h-10 rounded-xl border px-3 flex items-center gap-2">
           <span className="text-lg">{weather?.emoji ?? "🙂"}</span>
           <span className="text-sm opacity-70">{weather?.temp ?? ""}</span>
