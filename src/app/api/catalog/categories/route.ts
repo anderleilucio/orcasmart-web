@@ -1,269 +1,146 @@
 // src/app/api/catalog/categories/route.ts
+import "server-only";
 import { NextRequest, NextResponse } from "next/server";
-import { adminAuth, adminDb } from "@/lib/firebaseAdmin";
-import * as admin from "firebase-admin";
+import { adminDb } from "@/lib/firebaseAdmin";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
-function json(data: unknown, status = 200) {
-  return new NextResponse(JSON.stringify(data), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
+/** Modelo tipado sem `any` (campos extras ficam como `unknown`) */
+export type CatalogCategory = {
+  code: string;               // identificador único
+  name: string;               // nome exibido
+  slug?: string;
+  parentCode?: string | null; // relacionamento opcional
+  position?: number;
+  active?: boolean;
+  createdAt?: string | Date;
+  updatedAt?: string | Date;
+  // Campos adicionais permanecem permitidos:
+  [key: string]: unknown;
+};
+
+type CreateOrUpdatePayload = Partial<
+  Omit<CatalogCategory, "code" | "createdAt" | "updatedAt">
+> & { code?: string };
+
+/** Util de erro tipado */
+function getErrMsg(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  try { return String(err); } catch { return "Erro desconhecido"; }
 }
 
-async function getUid(req: NextRequest) {
-  const auth = req.headers.get("authorization") || "";
-  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-  if (!token) throw new Error("NO_TOKEN");
-  const decoded = await adminAuth.verifyIdToken(token);
-  return decoded.uid;
+/** Normaliza partes opcionais do Firestore p/ nosso tipo */
+function toCategory(id: string, data: Record<string, unknown>): CatalogCategory {
+  return {
+    code: String(data.code ?? id),
+    name: String(data.name ?? ""),
+    slug: typeof data.slug === "string" ? data.slug : undefined,
+    parentCode: (data.parentCode as string | null) ?? null,
+    position: typeof data.position === "number" ? data.position : undefined,
+    active: typeof data.active === "boolean" ? data.active : true,
+    createdAt: (data.createdAt as string | Date | undefined) ?? undefined,
+    updatedAt: (data.updatedAt as string | Date | undefined) ?? undefined,
+    ...data, // mantém campos extras como unknown
+  };
 }
 
-function slugifyLabel(label: string) {
-  return (label || "")
-    .toString()
-    .trim()
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
-
-// ✅ corrigida: agora não corta errado e valida depois
-function normalizePrefix(prefix?: string, fallback?: string) {
-  const p = (prefix || fallback || "")
-    .toString()
-    .toUpperCase()
-    .replace(/[^A-Z]/g, "")
-    .slice(0, 5); // até 5 letras
-  return p; // validação de tamanho feita depois
-}
-
-/**
- * GET /api/catalog/categories
- */
+/** GET /api/catalog/categories?parent=...&active=true&limit=200 */
 export async function GET(req: NextRequest) {
   try {
-    const uid = await getUid(req);
-    const snap = await adminDb
-      .collection("catalog_categories")
-      .where("ownerId", "==", uid)
-      .orderBy("label", "asc")
-      .get();
+    const url = new URL(req.url);
+    const parent = url.searchParams.get("parent");
+    const activeParam = url.searchParams.get("active");
+    const limitParam = Number(url.searchParams.get("limit") ?? "500");
+    const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 1000) : 500;
 
-    const items = snap.docs.map((d) => {
-      const data = d.data() as any;
-      return {
-        id: d.id,
-        label: data.label ?? "",
-        slug: data.slug ?? "",
-        prefix: data.prefix ?? "",
-        createdAt: data.createdAt?.toMillis?.() ?? null,
-      };
+    let q = adminDb.collection("catalog_categories");
+    if (parent !== null && parent !== undefined) {
+      // parent="" (raiz) ou parent="ABC"
+      q = q.where("parentCode", "==", parent === "" ? null : parent);
+    }
+    if (activeParam === "true") q = q.where("active", "==", true);
+    if (activeParam === "false") q = q.where("active", "==", false);
+
+    const snap = await q.limit(limit).get();
+
+    const items: CatalogCategory[] = [];
+    snap.forEach((doc) => {
+      const raw = doc.data() as Record<string, unknown>;
+      items.push(toCategory(doc.id, raw));
     });
-    return json({ items });
-  } catch (e: any) {
-    if (e?.message === "NO_TOKEN") return json({ error: "Usuário não autenticado" }, 401);
-    console.error("[categories GET] erro:", e);
-    return json({ error: e?.message ?? "Erro interno" }, 500);
+
+    return NextResponse.json(
+      { ok: true, count: items.length, items },
+      { status: 200, headers: { "Cache-Control": "no-store" } }
+    );
+  } catch (err: unknown) {
+    return NextResponse.json(
+      { ok: false, error: getErrMsg(err) },
+      { status: 400, headers: { "Cache-Control": "no-store" } }
+    );
   }
 }
 
-/**
- * POST /api/catalog/categories
- * Body: { label: string, slug?: string, prefix?: string }
- */
+/** POST /api/catalog/categories  (cria ou atualiza) */
 export async function POST(req: NextRequest) {
   try {
-    const uid = await getUid(req);
-    const body = (await req.json().catch(() => ({}))) as {
-      label?: string;
-      slug?: string;
-      prefix?: string;
-    };
+    const bodyUnknown = await req.json().catch(() => ({}));
+    if (!bodyUnknown || typeof bodyUnknown !== "object") {
+      return NextResponse.json({ ok: false, error: "Body inválido" }, { status: 400 });
+    }
+    const b = bodyUnknown as Record<string, unknown>;
 
-    const label = (body.label || "").toString().trim();
-    if (!label) return json({ error: "Label é obrigatório" }, 400);
+    const code = typeof b.code === "string" ? b.code.trim() : "";
+    const name = typeof b.name === "string" ? b.name.trim() : "";
+    const slug = typeof b.slug === "string" ? b.slug.trim() : undefined;
+    const parentCode =
+      typeof b.parentCode === "string" ? b.parentCode.trim() :
+      b.parentCode === null ? null : undefined;
+    const active =
+      typeof b.active === "boolean" ? b.active : true;
+    const position =
+      typeof b.position === "number" ? b.position : undefined;
 
-    const slug = (body.slug && body.slug.trim()) || slugifyLabel(label);
-    const prefix = normalizePrefix(body.prefix, slug.slice(0, 3));
-
-    if (!prefix || prefix.length < 2)
-      return json({ error: "Prefixo inválido (mínimo 2 letras)" }, 400);
-
-    // verifica duplicidades
-    const dupSlug = await adminDb
-      .collection("catalog_categories")
-      .where("ownerId", "==", uid)
-      .where("slug", "==", slug)
-      .limit(1)
-      .get();
-
-    if (!dupSlug.empty) {
-      const d = dupSlug.docs[0];
-      const data = d.data() as any;
-
-      const samePrefix = await adminDb
-        .collection("catalog_categories")
-        .where("ownerId", "==", uid)
-        .where("prefix", "==", prefix)
-        .get();
-
-      if (!samePrefix.empty) {
-        const clash = samePrefix.docs.find((doc) => doc.id !== d.id);
-        if (clash) return json({ error: "Prefixo já existe em outra categoria." }, 409);
-      }
-
-      await adminDb.collection("catalog_categories").doc(d.id).set(
-        {
-          label,
-          prefix,
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        },
-        { merge: true }
-      );
-
-      return json(
-        {
-          id: d.id,
-          label,
-          slug: data.slug,
-          prefix,
-          createdAt: data.createdAt?.toMillis?.() ?? null,
-          reused: true,
-        },
-        200
-      );
+    if (!code) {
+      return NextResponse.json({ ok: false, error: "Campo 'code' é obrigatório." }, { status: 400 });
+    }
+    if (!name) {
+      return NextResponse.json({ ok: false, error: "Campo 'name' é obrigatório." }, { status: 400 });
     }
 
-    // prefixo duplicado
-    const dupPrefix = await adminDb
-      .collection("catalog_categories")
-      .where("ownerId", "==", uid)
-      .where("prefix", "==", prefix)
-      .limit(1)
-      .get();
+    const now = new Date();
+    const ref = adminDb.collection("catalog_categories").doc(code);
 
-    if (!dupPrefix.empty)
-      return json({ error: "Prefixo já existe em outra categoria." }, 409);
-
-    // cria
-    const ref = await adminDb.collection("catalog_categories").add({
-      ownerId: uid,
-      label,
-      slug,
-      prefix,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-
-    const data = (await ref.get()).data() as any;
-    return json(
+    await ref.set(
       {
-        id: ref.id,
-        label: data.label,
-        slug: data.slug,
-        prefix: data.prefix,
-        createdAt: data.createdAt?.toMillis?.() ?? null,
+        code,
+        name,
+        slug,
+        parentCode: parentCode ?? null,
+        active,
+        position,
+        updatedAt: now,
+        // createdAt só na criação (merge mantém se já existir)
+        createdAt: now,
       },
-      201
+      { merge: true }
     );
-  } catch (e: any) {
-    if (e?.message === "NO_TOKEN") return json({ error: "Usuário não autenticado" }, 401);
-    console.error("[categories POST] erro:", e);
-    return json({ error: e?.message ?? "Erro interno" }, 500);
+
+    return NextResponse.json({ ok: true, code }, { status: 200 });
+  } catch (err: unknown) {
+    return NextResponse.json({ ok: false, error: getErrMsg(err) }, { status: 400 });
   }
 }
 
-/**
- * PUT /api/catalog/categories?id=<id>
- * Body: { label?: string, prefix?: string }
- */
-export async function PUT(req: NextRequest) {
-  try {
-    const uid = await getUid(req);
-    const { searchParams } = new URL(req.url);
-    const id = (searchParams.get("id") || "").trim();
-    if (!id) return json({ error: "ID é obrigatório" }, 400);
-
-    const body = (await req.json().catch(() => ({}))) as {
-      label?: string;
-      prefix?: string;
-    };
-
-    const ref = adminDb.collection("catalog_categories").doc(id);
-    const snap = await ref.get();
-    if (!snap.exists) return json({ error: "Categoria não encontrada" }, 404);
-    if ((snap.data() as any)?.ownerId !== uid) return json({ error: "Proibido" }, 403);
-
-    const updates: any = {
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    };
-
-    if (body.label !== undefined) {
-      const label = String(body.label || "").trim();
-      if (!label) return json({ error: "Label inválido" }, 400);
-      updates.label = label;
-    }
-
-    if (body.prefix !== undefined) {
-      const prefix = normalizePrefix(body.prefix);
-      if (!prefix || prefix.length < 2)
-        return json({ error: "Prefixo inválido (mínimo 2 letras)" }, 400);
-
-      const clash = await adminDb
-        .collection("catalog_categories")
-        .where("ownerId", "==", uid)
-        .where("prefix", "==", prefix)
-        .get();
-
-      if (!clash.empty) {
-        const other = clash.docs.find((d) => d.id !== id);
-        if (other) return json({ error: "Prefixo já existe em outra categoria." }, 409);
-      }
-      updates.prefix = prefix;
-    }
-
-    await ref.set(updates, { merge: true });
-
-    const data = (await ref.get()).data() as any;
-    return json({
-      id,
-      label: data.label,
-      slug: data.slug,
-      prefix: data.prefix,
-      createdAt: data.createdAt?.toMillis?.() ?? null,
-    });
-  } catch (e: any) {
-    if (e?.message === "NO_TOKEN") return json({ error: "Usuário não autenticado" }, 401);
-    console.error("[categories PUT] erro:", e);
-    return json({ error: e?.message ?? "Erro interno" }, 500);
-  }
-}
-
-/**
- * DELETE /api/catalog/categories?id=<docId>
- */
-export async function DELETE(req: NextRequest) {
-  try {
-    const uid = await getUid(req);
-    const { searchParams } = new URL(req.url);
-    const id = (searchParams.get("id") || "").trim();
-    if (!id) return json({ error: "ID é obrigatório" }, 400);
-
-    const ref = adminDb.collection("catalog_categories").doc(id);
-    const snap = await ref.get();
-    if (!snap.exists) return json({ error: "Categoria não encontrada" }, 404);
-    if ((snap.data() as any)?.ownerId !== uid) return json({ error: "Proibido" }, 403);
-
-    await ref.delete();
-    return json({ ok: true });
-  } catch (e: any) {
-    if (e?.message === "NO_TOKEN") return json({ error: "Usuário não autenticado" }, 401);
-    console.error("[categories DELETE] erro:", e);
-    return json({ error: e?.message ?? "Erro interno" }, 500);
-  }
+export async function OPTIONS() {
+  return new NextResponse(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Cache-Control": "no-store",
+    },
+  });
 }
