@@ -1,135 +1,106 @@
 // src/app/api/products/export/route.ts
+import "server-only";
 import { NextRequest, NextResponse } from "next/server";
-import { adminAuth, adminDb } from "@/lib/firebaseAdmin";
+import { adminDb } from "@/lib/firebaseAdmin";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
-// Helpers
-function csvEscape(v: string): string {
-  // Sempre entre aspas e duplica aspas internas
-  return `"${(v ?? "").replace(/"/g, '""')}"`;
+type Product = {
+  sku: string;
+  name: string;
+  unit?: string;
+  active?: boolean;
+  price?: number;
+  stock?: number;
+  images?: string[];
+  [k: string]: unknown;
+};
+
+function asRecord(u: unknown): Record<string, unknown> {
+  return u && typeof u === "object" ? (u as Record<string, unknown>) : {};
 }
-function toStr(v: unknown): string {
-  if (v == null) return "";
-  return String(v);
+function toProduct(id: string, raw: Record<string, unknown>): Product {
+  return {
+    sku: String(raw.sku ?? id),
+    name: String(raw.name ?? ""),
+    unit: typeof raw.unit === "string" ? raw.unit : "un",
+    active: typeof raw.active === "boolean" ? raw.active : true,
+    price: typeof raw.price === "number" ? raw.price : undefined,
+    stock: typeof raw.stock === "number" ? raw.stock : undefined,
+    images: Array.isArray(raw.images)
+      ? (raw.images.filter((x) => typeof x === "string") as string[])
+      : undefined,
+    ...raw,
+  };
 }
-function toPreco(v: unknown): string {
-  const n = Number(v ?? 0);
-  // Export com ponto decimal (compatível com import)
-  return Number.isFinite(n) ? n.toFixed(2) : "0.00";
-}
-function toInt(v: unknown): string {
-  const n = Number(v ?? 0);
-  return Number.isFinite(n) ? Math.max(0, Math.trunc(n)).toString() : "0";
-}
-function toBool(v: unknown): string {
-  return v === false ? "false" : "true";
+function csvEscape(s: string) {
+  return `"${s.replace(/"/g, '""')}"`;
 }
 
-async function getUid(req: NextRequest) {
-  const auth = req.headers.get("authorization") || "";
-  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-  if (!token) throw new Error("NO_TOKEN");
-  const decoded = await adminAuth.verifyIdToken(token);
-  return decoded.uid;
-}
-
-// GET /api/products/export
+/**
+ * GET /api/products/export
+ * Query params:
+ *  - limit: número de itens (default 1000, máx 5000)
+ *  - active: "true" | "false" | omitido
+ */
 export async function GET(req: NextRequest) {
   try {
-    const uid = await getUid(req);
+    const url = new URL(req.url);
+    const limitParam = Number(url.searchParams.get("limit") ?? "1000");
+    const activeParam = url.searchParams.get("active");
 
-    // Paginação manual para exportar "todos" (em lotes), ordenado por createdAt desc quando possível
-    const PAGE = 500;
-    let lastDoc: FirebaseFirestore.QueryDocumentSnapshot | null = null;
-    const all: any[] = [];
+    const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 5000) : 1000;
 
-    // Tenta com orderBy(createdAt). Se não der (sem índice / campo ausente), cai para sem ordenação.
-    let useFallback = false;
-    for (;;) {
-      let q = adminDb
-        .collection("products")
-        .where("ownerId", "==", uid)
-        .orderBy("createdAt", "desc")
-        .limit(PAGE);
+    let q = adminDb.collection("products").orderBy("updatedAt", "desc");
+    if (activeParam === "true") q = q.where("active", "==", true);
+    if (activeParam === "false") q = q.where("active", "==", false);
 
-      try {
-        if (lastDoc) q = q.startAfter(lastDoc);
-        const snap = await q.get();
-        if (snap.empty) break;
-        all.push(...snap.docs);
-        lastDoc = snap.docs[snap.docs.length - 1];
-        if (snap.size < PAGE) break; // acabou
-      } catch {
-        useFallback = true;
-        break;
-      }
-    }
+    const snap = await q.limit(limit).get();
+    const rows: Product[] = [];
+    snap.forEach((doc) => rows.push(toProduct(doc.id, asRecord(doc.data()))));
 
-    if (useFallback) {
-      lastDoc = null;
-      for (;;) {
-        let q = adminDb
-          .collection("products")
-          .where("ownerId", "==", uid)
-          .limit(PAGE);
-        if (lastDoc) q = q.startAfter(lastDoc);
-        const snap = await q.get();
-        if (snap.empty) break;
-        all.push(...snap.docs);
-        lastDoc = snap.docs[snap.docs.length - 1];
-        if (snap.size < PAGE) break;
-      }
-    }
+    const header = ["SKU", "Nome", "Preco", "Estoque", "Ativo", "Unidade", "Imagens"].join(",");
+    const lines = rows.map((p) => {
+      const preco = typeof p.price === "number" ? p.price.toFixed(2) : "0.00";
+      const estoque = typeof p.stock === "number" ? String(p.stock) : "0";
+      const ativo = p.active ? "true" : "false";
+      const unit = p.unit || "un";
+      const images = (p.images || []).join(" ");
+      return [
+        csvEscape(p.sku),
+        csvEscape(p.name),
+        csvEscape(preco),
+        csvEscape(estoque),
+        csvEscape(ativo),
+        csvEscape(unit),
+        csvEscape(images),
+      ].join(",");
+    });
 
-    // Monta CSV com cabeçalho compatível com o import
-    const header = "sku,nome,preco,estoque,ativo,unidade,imagens";
-    const lines = [header];
-
-    for (const d of all) {
-      const data = d.data() as any;
-      const sku = csvEscape(toStr(data.sku));
-      const nome = csvEscape(toStr(data.name));
-      const preco = csvEscape(toPreco(data.price));
-      const estoque = csvEscape(toInt(data.stock));
-      const ativo = csvEscape(toBool(data.active));
-      const unidade = csvEscape(toStr(data.unit || "un"));
-
-      // imagens: prioriza array `images`; senão usa `image`
-      let imagensVal = "";
-      if (Array.isArray(data.images) && data.images.length) {
-        // Caso haja múltiplas, junte com ';' (import já entende)
-        imagensVal = data.images.map((u: any) => toStr(u).trim()).filter(Boolean).join(";");
-      } else if (data.image) {
-        imagensVal = toStr(data.image).trim();
-      }
-      const imagens = csvEscape(imagensVal);
-
-      lines.push([sku, nome, preco, estoque, ativo, unidade, imagens].join(","));
-    }
-
-    const csv = "\uFEFF" + lines.join("\n"); // BOM p/ Excel
-    const res = new NextResponse(csv, {
+    const csv = "\uFEFF" + [header, ...lines].join("\n");
+    return new NextResponse(csv, {
       status: 200,
       headers: {
         "Content-Type": "text/csv; charset=utf-8",
-        "Content-Disposition": `attachment; filename="produtos-export.csv"`,
+        "Content-Disposition": `attachment; filename="products_export.csv"`,
         "Cache-Control": "no-store",
       },
     });
-    return res;
-  } catch (e: any) {
-    if (e?.message === "NO_TOKEN") {
-      return new NextResponse(JSON.stringify({ error: "Usuário não autenticado" }), {
-        status: 401,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-    console.error("[products EXPORT] erro:", e);
-    return new NextResponse(JSON.stringify({ error: e?.message ?? "Erro interno" }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : "Erro desconhecido";
+    return NextResponse.json({ ok: false, error: message }, { status: 400 });
   }
+}
+
+export async function OPTIONS() {
+  return new NextResponse(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Methods": "GET, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Cache-Control": "no-store",
+    },
+  });
 }
