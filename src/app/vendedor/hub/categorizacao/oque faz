@@ -1,0 +1,8 @@
+
+
+
+O que esta página faz
+	•	CRUD de regras do cliente via os endpoints que criamos:
+	•	Lista, cria/edita (merge) e apaga.
+	•	Teste ao vivo com /api/catalog/suggest (leva em conta as regras do cliente + fallbacks globais).
+	•	Seguro: usa o auth.getIdToken() nos requests, não mexe em outras telas.

@@ -1,0 +1,17 @@
+
+
+
+Serve para editar informes para digitar o SKU ex: cabo elétrico (ELE-???)
+
+O que este endpoint faz
+	•	Lê o token do usuário (mesma lógica dos seus outros endpoints).
+	•	Procura regras do cliente em catalog_rules (por ownerId).
+	•	Se alguma regra do cliente casar com o nome/arquivo, retorna {category, prefix, source: 'user_rule'}.
+	•	Se não houver match, cai no seu helper global finalizeCategoryAndSku para sugerir pela keyword/prefixo do SKU.
+------------------------------------------------>------------------------------------------
+
+O que entregamos neste passo
+	•	GET /api/catalog/rules → lista regras do cliente (ordenadas por updatedAt).
+	•	POST /api/catalog/rules → cria ou atualiza (merge) uma regra.
+	•	DELETE /api/catalog/rules/:id → apaga uma regra específica.
+	•	Segurança: todas usam ownerId do token; não há impacto no cadastro de produtos existente.

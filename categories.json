@@ -1,0 +1,67 @@
+[
+  {
+    "code": "CIM",
+    "name": "Cimentos e Argamassas",
+    "synonyms": ["cimento", "argamassa", "massa", "rejunte", "emboço", "chapisco"]
+  },
+  {
+    "code": "TIN",
+    "name": "Tintas e Acessórios",
+    "synonyms": ["tinta", "pincel", "rolo", "selador", "primer", "látex", "acrílica"]
+  },
+  {
+    "code": "ELE",
+    "name": "Materiais Elétricos",
+    "synonyms": ["fio", "cabo", "tomada", "interruptor", "lâmpada", "led", "disjuntor"]
+  },
+  {
+    "code": "HID",
+    "name": "Hidráulica e Conexões",
+    "synonyms": ["cano", "tubo", "torneira", "registro", "válvula", "joelho", "PVC", "conexão"]
+  },
+  {
+    "code": "FER",
+    "name": "Ferragens e Fixadores",
+    "synonyms": ["parafuso", "pregos", "dobradiça", "trava", "cadeado", "trinco", "suporte"]
+  },
+  {
+    "code": "MAD",
+    "name": "Madeiras e Compensados",
+    "synonyms": ["madeira", "sarrafo", "viga", "caibro", "compensado", "MDF", "OSB"]
+  },
+  {
+    "code": "REV",
+    "name": "Revestimentos e Pisos",
+    "synonyms": ["piso", "porcelanato", "azulejo", "revestimento", "rodapé", "cerâmica"]
+  },
+  {
+    "code": "CON",
+    "name": "Concretos e Agregados",
+    "synonyms": ["brita", "pedra", "areia", "cascalho", "concreto", "cimento queimado"]
+  },
+  {
+    "code": "ESQ",
+    "name": "Esquadrias e Portas",
+    "synonyms": ["janela", "porta", "basculante", "alumínio", "vidro", "caixilho"]
+  },
+  {
+    "code": "TEL",
+    "name": "Telhas e Coberturas",
+    "synonyms": ["telha", "cumeeira", "calha", "pingadeira", "forro", "telhado"]
+  },
+  {
+    "code": "INS",
+    "name": "Isolantes e Impermeabilizantes",
+    "synonyms": ["impermeabilizante", "vedação", "silicone", "manta", "isolante", "resina"]
+  },
+  {
+    "code": "ACE",
+    "name": "Acessórios de Obra",
+    "synonyms": ["luva", "óculos", "máscara", "cinto", "bota", "EPI", "equipamento"]
+  },
+  {
+    "code": "FERM",
+    "name": "Ferramentas",
+    "synonyms": ["martelo", "chave", "alicate", "serrote", "furadeira", "nivelador", "martelete"]
+  }
+]
