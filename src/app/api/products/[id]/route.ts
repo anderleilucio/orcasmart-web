@@ -1,112 +1,124 @@
 // src/app/api/products/[id]/route.ts
+import "server-only";
 import { NextRequest, NextResponse } from "next/server";
-import { adminAuth, adminDb } from "@/lib/firebaseAdmin";
-import * as admin from "firebase-admin";
+import { adminDb } from "@/lib/firebaseAdmin";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
-function json(data: unknown, status = 200) {
-  return new NextResponse(JSON.stringify(data), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
+type Product = {
+  sku: string;                 // id do doc = sku
+  name: string;
+  categoryCode?: string | null;
+  prefix?: string | null;
+  unit?: string;
+  active?: boolean;
+  price?: number;              // opcional
+  stock?: number;              // opcional
+  images?: string[];           // urls
+  ownerId?: string | null;
+  createdAt?: Date | string;
+  updatedAt?: Date | string;
+  [k: string]: unknown;        // campos extras permanecem
+};
+
+function errMsg(e: unknown) {
+  return e instanceof Error ? e.message : "Erro desconhecido";
+}
+function asRecord(u: unknown): Record<string, unknown> {
+  return u && typeof u === "object" ? (u as Record<string, unknown>) : {};
+}
+function toProduct(id: string, raw: Record<string, unknown>): Product {
+  return {
+    sku: String(raw.sku ?? id),
+    name: String(raw.name ?? ""),
+    categoryCode: (raw.categoryCode as string | null) ?? null,
+    prefix: (raw.prefix as string | null) ?? null,
+    unit: typeof raw.unit === "string" ? raw.unit : "un",
+    active: typeof raw.active === "boolean" ? raw.active : true,
+    price: typeof raw.price === "number" ? raw.price : undefined,
+    stock: typeof raw.stock === "number" ? raw.stock : undefined,
+    images: Array.isArray(raw.images)
+      ? raw.images.filter((x) => typeof x === "string") as string[]
+      : undefined,
+    ownerId: (raw.ownerId as string | null) ?? null,
+    createdAt: (raw.createdAt as Date | string | undefined) ?? undefined,
+    updatedAt: (raw.updatedAt as Date | string | undefined) ?? undefined,
+    ...raw,
+  };
+}
+function sanitizeUpdate(body: Record<string, unknown>): Partial<Product> {
+  const p: Partial<Product> = {};
+  if (typeof body.name === "string") p.name = body.name.trim();
+  if (typeof body.categoryCode === "string" || body.categoryCode === null) p.categoryCode = body.categoryCode ?? null;
+  if (typeof body.prefix === "string" || body.prefix === null) p.prefix = body.prefix ?? null;
+  if (typeof body.unit === "string") p.unit = body.unit;
+  if (typeof body.active === "boolean") p.active = body.active;
+  if (typeof body.price === "number" && Number.isFinite(body.price)) p.price = body.price;
+  if (typeof body.stock === "number" && Number.isFinite(body.stock)) p.stock = body.stock;
+  if (Array.isArray(body.images)) p.images = body.images.filter((x) => typeof x === "string") as string[];
+  if (typeof body.ownerId === "string" || body.ownerId === null) p.ownerId = body.ownerId ?? null;
+  return p;
+}
+
+/** GET /api/products/[id] */
+export async function GET(_req: NextRequest, context: { params: Promise<{ id: string }> }) {
+  try {
+    const { id } = await context.params;
+    const doc = await adminDb.collection("products").doc(id).get();
+    if (!doc.exists) {
+      return NextResponse.json({ ok: false, error: "Produto não encontrado" }, { status: 404 });
+    }
+    const data = toProduct(doc.id, asRecord(doc.data()));
+    return NextResponse.json({ ok: true, item: data }, { status: 200, headers: { "Cache-Control": "no-store" } });
+  } catch (e: unknown) {
+    return NextResponse.json({ ok: false, error: errMsg(e) }, { status: 400 });
+  }
+}
+
+/** PUT /api/products/[id]  (parcial) */
+export async function PUT(req: NextRequest, context: { params: Promise<{ id: string }> }) {
+  try {
+    const { id } = await context.params;
+    const bodyUnknown = await req.json().catch(() => ({}));
+    if (!bodyUnknown || typeof bodyUnknown !== "object") {
+      return NextResponse.json({ ok: false, error: "Body inválido" }, { status: 400 });
+    }
+    const patch = sanitizeUpdate(asRecord(bodyUnknown));
+    if (Object.keys(patch).length === 0) {
+      return NextResponse.json({ ok: false, error: "Nada para atualizar" }, { status: 400 });
+    }
+    patch.updatedAt = new Date();
+
+    await adminDb.collection("products").doc(id).set(patch, { merge: true });
+
+    const fresh = await adminDb.collection("products").doc(id).get();
+    const data = toProduct(fresh.id, asRecord(fresh.data()));
+    return NextResponse.json({ ok: true, item: data }, { status: 200 });
+  } catch (e: unknown) {
+    return NextResponse.json({ ok: false, error: errMsg(e) }, { status: 400 });
+  }
+}
+
+/** DELETE /api/products/[id] */
+export async function DELETE(_req: NextRequest, context: { params: Promise<{ id: string }> }) {
+  try {
+    const { id } = await context.params;
+    await adminDb.collection("products").doc(id).delete();
+    return NextResponse.json({ ok: true }, { status: 200 });
+  } catch (e: unknown) {
+    return NextResponse.json({ ok: false, error: errMsg(e) }, { status: 400 });
+  }
 }
 
 export async function OPTIONS() {
   return new NextResponse(null, {
     status: 204,
     headers: {
-      "Access-Control-Allow-Methods": "GET,PATCH,DELETE,OPTIONS",
-      "Access-Control-Allow-Headers": "authorization, content-type",
+      "Access-Control-Allow-Methods": "GET, PUT, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Cache-Control": "no-store",
     },
   });
-}
-
-async function getUid(req: NextRequest) {
-  const h = req.headers.get("authorization") || "";
-  const token = h.startsWith("Bearer ") ? h.slice(7) : "";
-  if (!token) throw new Error("NO_TOKEN");
-  const decoded = await adminAuth.verifyIdToken(token);
-  return decoded.uid;
-}
-
-export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
-  const ref = adminDb.collection("products").doc(params.id);
-  const snap = await ref.get();
-  if (!snap.exists) return json({ error: "Produto não encontrado" }, 404);
-  return json({ id: snap.id, ...snap.data() });
-}
-
-export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
-  try {
-    const uid = await getUid(req);
-
-    const ref = adminDb.collection("products").doc(params.id);
-    const snap = await ref.get();
-    if (!snap.exists) return json({ error: "Produto não encontrado" }, 404);
-
-    const current = snap.data() as any;
-    if (current?.ownerId && current.ownerId !== uid) return json({ error: "Sem permissão" }, 403);
-
-    const body = await req.json().catch(() => ({}));
-    const allowed: Record<string, any> = {};
-
-    if (typeof body.name === "string") allowed.name = body.name.trim();
-    if (typeof body.sku === "string") allowed.sku = body.sku.trim();
-
-    if (body.price !== undefined) {
-      const n = Number(body.price);
-      allowed.price = Number.isFinite(n) ? n : 0;
-    }
-    if (body.stock !== undefined) {
-      const n = Number(body.stock);
-      allowed.stock = Number.isFinite(n) ? n : 0;
-    }
-
-    if (typeof body.active === "boolean") allowed.active = body.active;
-
-    // unit (opcional, compatível com import)
-    if (typeof body.unit === "string") allowed.unit = body.unit.trim();
-
-    // images: aceita array (inclusive vazio para remover)
-    if (Array.isArray(body.images)) {
-      const arr = body.images.filter((u: any) => typeof u === "string" && u.trim());
-      allowed.images = arr;
-      // opcional: mantém um campo "image" com a primeira (compat com telas antigas)
-      allowed.image = arr[0] || "";
-    }
-
-    if (!Object.keys(allowed).length) return json({ error: "Nada para atualizar" }, 400);
-
-    allowed.updatedAt = admin.firestore.FieldValue.serverTimestamp();
-
-    await ref.update(allowed);
-    const updated = await ref.get();
-    return json({ id: updated.id, ...updated.data() });
-  } catch (e: any) {
-    if (e?.message === "NO_TOKEN") return json({ error: "Usuário não autenticado" }, 401);
-    console.error("[products PATCH] erro:", e);
-    return json({ error: "Erro interno" }, 500);
-  }
-}
-
-export async function DELETE(req: NextRequest, { params }: { params: { id: string } }) {
-  try {
-    const uid = await getUid(req);
-
-    const ref = adminDb.collection("products").doc(params.id);
-    const snap = await ref.get();
-    if (!snap.exists) return json({ error: "Produto não encontrado" }, 404);
-
-    const data = snap.data() as any;
-    if (data?.ownerId && data.ownerId !== uid) return json({ error: "Sem permissão" }, 403);
-
-    await ref.delete();
-    return json({ ok: true });
-  } catch (e: any) {
-    if (e?.message === "NO_TOKEN") return json({ error: "Usuário não autenticado" }, 401);
-    console.error("[products DELETE] erro:", e);
-    return json({ error: "Erro interno" }, 500);
-  }
 }
