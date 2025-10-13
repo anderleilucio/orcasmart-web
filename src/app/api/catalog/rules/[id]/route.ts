@@ -1,4 +1,3 @@
-// src/app/api/catalog/rules/[id]/route.ts
 import "server-only";
 import { NextRequest, NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebaseAdmin";
@@ -19,7 +18,6 @@ type CatalogRule = {
   ownerId?: string | null;
   createdAt?: string | Date;
   updatedAt?: string | Date;
-  // campos extra, mas tipados como unknown
   [key: string]: unknown;
 };
 
@@ -27,18 +25,14 @@ type UpsertPayload = Partial<Omit<CatalogRule, "id" | "createdAt" | "updatedAt">
 
 function getErrMsg(err: unknown): string {
   if (err instanceof Error) return err.message;
-  try {
-    return String(err);
-  } catch {
-    return "Erro desconhecido";
-  }
+  try { return String(err); } catch { return "Erro desconhecido"; }
 }
 
 /* ========================= Handlers ========================= */
 
-export async function GET(_req: NextRequest, context: RouteContext) {
+export async function GET(_req: NextRequest, ctx: RouteContext) {
   try {
-    const { id } = await context.params;
+    const { id } = await ctx.params;
 
     const ref = adminDb.collection("catalog_rules").doc(id);
     const snap = await ref.get();
@@ -66,9 +60,9 @@ export async function GET(_req: NextRequest, context: RouteContext) {
   }
 }
 
-export async function PUT(req: NextRequest, context: RouteContext) {
+export async function PUT(req: NextRequest, ctx: RouteContext) {
   try {
-    const { id } = await context.params;
+    const { id } = await ctx.params;
 
     const bodyUnknown = await req.json().catch(() => ({}));
     if (!bodyUnknown || typeof bodyUnknown !== "object") {
@@ -96,10 +90,7 @@ export async function PUT(req: NextRequest, context: RouteContext) {
 
     const now = new Date();
     await adminDb.collection("catalog_rules").doc(id).set(
-      {
-        ...payload,
-        updatedAt: now,
-      },
+      { ...payload, updatedAt: now },
       { merge: true }
     );
 
@@ -109,9 +100,9 @@ export async function PUT(req: NextRequest, context: RouteContext) {
   }
 }
 
-export async function DELETE(_req: NextRequest, context: RouteContext) {
+export async function DELETE(_req: NextRequest, ctx: RouteContext) {
   try {
-    const { id } = await context.params;
+    const { id } = await ctx.params;
     await adminDb.collection("catalog_rules").doc(id).delete();
     return NextResponse.json({ ok: true, id }, { status: 200 });
   } catch (err: unknown) {
