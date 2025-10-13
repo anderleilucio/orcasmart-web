@@ -1,361 +1,181 @@
 // src/app/api/products/route.ts
+import "server-only";
 import { NextRequest, NextResponse } from "next/server";
-import { adminAuth, adminDb } from "@/lib/firebaseAdmin";
-import * as admin from "firebase-admin";
-import { finalizeCategoryAndSku } from "@/lib/catalog/finalizeCategory";
+import { adminDb } from "@/lib/firebaseAdmin";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
-function json(data: unknown, status = 200) {
-  return new NextResponse(JSON.stringify(data), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
+type Product = {
+  sku: string;
+  name: string;
+  categoryCode?: string | null;
+  prefix?: string | null;
+  unit?: string;
+  active?: boolean;
+  price?: number;
+  stock?: number;
+  images?: string[];
+  ownerId?: string | null;
+  createdAt?: Date | string;
+  updatedAt?: Date | string;
+  [k: string]: unknown;
+};
+
+function errMsg(e: unknown) {
+  return e instanceof Error ? e.message : "Erro desconhecido";
+}
+function asRecord(u: unknown): Record<string, unknown> {
+  return u && typeof u === "object" ? (u as Record<string, unknown>) : {};
+}
+function toProduct(id: string, raw: Record<string, unknown>): Product {
+  return {
+    sku: String(raw.sku ?? id),
+    name: String(raw.name ?? ""),
+    categoryCode: (raw.categoryCode as string | null) ?? null,
+    prefix: (raw.prefix as string | null) ?? null,
+    unit: typeof raw.unit === "string" ? raw.unit : "un",
+    active: typeof raw.active === "boolean" ? raw.active : true,
+    price: typeof raw.price === "number" ? raw.price : undefined,
+    stock: typeof raw.stock === "number" ? raw.stock : undefined,
+    images: Array.isArray(raw.images)
+      ? (raw.images.filter((x) => typeof x === "string") as string[])
+      : undefined,
+    ownerId: (raw.ownerId as string | null) ?? null,
+    createdAt: (raw.createdAt as Date | string | undefined) ?? undefined,
+    updatedAt: (raw.updatedAt as Date | string | undefined) ?? undefined,
+    ...raw,
+  };
+}
+function sanitizeUpsert(body: Record<string, unknown>): Partial<Product> & { sku?: string; name?: string } {
+  const p: Partial<Product> & { sku?: string; name?: string } = {};
+  if (typeof body.sku === "string") p.sku = body.sku.trim();
+  if (typeof body.name === "string") p.name = body.name.trim();
+  if (typeof body.categoryCode === "string" || body.categoryCode === null) p.categoryCode = body.categoryCode ?? null;
+  if (typeof body.prefix === "string" || body.prefix === null) p.prefix = body.prefix ?? null;
+  if (typeof body.unit === "string") p.unit = body.unit;
+  if (typeof body.active === "boolean") p.active = body.active;
+  if (typeof body.price === "number" && Number.isFinite(body.price)) p.price = body.price;
+  if (typeof body.stock === "number" && Number.isFinite(body.stock)) p.stock = body.stock;
+  if (Array.isArray(body.images)) p.images = body.images.filter((x) => typeof x === "string") as string[];
+  if (typeof body.ownerId === "string" || body.ownerId === null) p.ownerId = body.ownerId ?? null;
+  return p;
 }
 
-async function getUidFromHeader(req: NextRequest) {
-  const auth = req.headers.get("authorization") || "";
-  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-  if (!token) throw new Error("NO_TOKEN");
-  const decoded = await adminAuth.verifyIdToken(token);
-  return decoded.uid;
-}
-
-// -------------------- categorias do usuário --------------------
-function norm(s: string) {
-  return (s || "")
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
-}
-function slugifyLabel(label: string) {
-  return norm(label).replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-}
-async function loadUserCategories(uid: string) {
-  const snap = await adminDb
-    .collection("catalog_categories")
-    .where("ownerId", "==", uid)
-    .get();
-
-  const cats = snap.docs.map((d) => {
-    const c = d.data() as any;
-    const label = String(c.label || "");
-    const slug = c.slug ? String(c.slug) : slugifyLabel(label);
-    const prefix = String(c.prefix || "").toUpperCase();
-    return { id: d.id, slug, prefix };
-  });
-
-  const prefixToSlug: Record<string, string> = {};
-  const slugToPrefix: Record<string, string> = {};
-  for (const c of cats) {
-    if (c.prefix) prefixToSlug[c.prefix] = c.slug;
-    if (c.slug) slugToPrefix[c.slug] = c.prefix;
-  }
-  return { cats, prefixToSlug, slugToPrefix };
-}
-
-function extractPrefixFromSku(sku: string | null | undefined): string | null {
-  const m = (sku || "").toUpperCase().match(/^([A-Z]{2,5})[-_]/);
-  return m ? m[1] : null;
-}
-// ---------------------------------------------------------------
-
-// Normaliza query param active
-function parseActiveParam(v: string | null): boolean | null {
-  if (!v) return null;
-  const s = String(v).toLowerCase().trim();
-  if (["true", "1", "yes", "y", "ativo", "active"].includes(s)) return true;
-  if (["false", "0", "no", "n", "inativo", "inactive", "arquivado", "archived"].includes(s)) return false;
-  return null;
-}
-
-/* ============================= IMAGENS ============================== */
-const IMAGE_KEY_RE = /(image|imagem|imagens|foto|fotos|photo|url|urls|link|links)/i;
-const URL_RE = /\bhttps?:\/\/[^\s"']+/gi;
-
-function coerceToList(val: unknown): string[] {
-  if (val == null) return [];
-  if (Array.isArray(val)) return val.flatMap(coerceToList);
-  if (typeof val === "string") {
-    const trimmed = val.trim();
-    if (
-      (trimmed.startsWith("[") && trimmed.endsWith("]")) ||
-      (trimmed.startsWith("{") && trimmed.endsWith("}"))
-    ) {
-      try {
-        const parsed = JSON.parse(trimmed);
-        return coerceToList(parsed);
-      } catch {/* ignore */}
-    }
-    const out: string[] = [];
-    const matches = trimmed.match(URL_RE);
-    if (matches?.length) out.push(...matches);
-    if (out.length === 0) {
-      out.push(
-        ...trimmed
-          .split(/\r?\n|,|;|\||\s+/g)
-          .filter((s) => s.startsWith("http://") || s.startsWith("https://"))
-      );
-    }
-    return out;
-  }
-  if (typeof val === "object") {
-    const collected: string[] = [];
-    for (const v of Object.values(val as Record<string, unknown>)) {
-      collected.push(...coerceToList(v));
-    }
-    return collected;
-  }
-  return [];
-}
-
-function normalizeImagesDeep(body: any): string[] {
-  if (!body || typeof body !== "object") return [];
-  const results: string[] = [];
-  const stack: any[] = [body];
-  const seen = new Set<any>();
-  while (stack.length) {
-    const cur = stack.pop();
-    if (!cur || typeof cur !== "object" || seen.has(cur)) continue;
-    seen.add(cur);
-    for (const [rawKey, value] of Object.entries(cur as Record<string, unknown>)) {
-      const key = String(rawKey).toLowerCase();
-      if (IMAGE_KEY_RE.test(key)) results.push(...coerceToList(value));
-      if (value && typeof value === "object") stack.push(value);
-    }
-  }
-  if (results.length === 0) results.push(...coerceToList(body));
-  const clean = results
-    .map((u) => (typeof u === "string" ? u.trim() : ""))
-    .filter((u) => u && (u.startsWith("http://") || u.startsWith("https://")));
-  return Array.from(new Set(clean));
-}
-/* ==================================================================== */
-
-/** =============================== GET =============================== */
+/**
+ * GET /api/products
+ * Query params:
+ *  - q: busca por prefixo/exato em sku ou case-insensitive em name (filtro em memória após query simples)
+ *  - category: categoryCode
+ *  - active: "true" | "false"
+ *  - limit: default 50 (máx 200)
+ *  - order: "name" | "sku" | "updatedAt" (default "updatedAt")
+ *  - dir: "asc" | "desc" (default "desc")
+ */
 export async function GET(req: NextRequest) {
   try {
-    const uid = await getUidFromHeader(req);
-    const { searchParams } = new URL(req.url);
+    const url = new URL(req.url);
+    const q = (url.searchParams.get("q") || "").trim();
+    const category = url.searchParams.get("category");
+    const activeParam = url.searchParams.get("active");
+    const order = (url.searchParams.get("order") || "updatedAt").toLowerCase();
+    const dir = (url.searchParams.get("dir") || "desc").toLowerCase();
+    const limitParam = Number(url.searchParams.get("limit") ?? "50");
 
-    const limit = Math.max(1, Math.min(50, Number(searchParams.get("limit") || 20)));
-    const startAfterMs = Number(searchParams.get("startAfter") || 0);
-    const activeFilter = parseActiveParam(searchParams.get("active"));
+    const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 200) : 50;
+    const orderField = order === "name" ? "name" : order === "sku" ? "sku" : "updatedAt";
+    const orderDir: "asc" | "desc" = dir === "asc" ? "asc" : "desc";
 
-    let q: FirebaseFirestore.Query = adminDb
-      .collection("products")
-      .where("ownerId", "==", uid);
+    let query = adminDb.collection("products").orderBy(orderField, orderDir);
 
-    if (activeFilter !== null) q = q.where("active", "==", activeFilter);
-
-    q = q.orderBy("createdAt", "desc").limit(limit);
-
-    let snap: FirebaseFirestore.QuerySnapshot;
-    let usedFallback = false;
-
-    try {
-      if (startAfterMs > 0) {
-        q = q.startAfter(admin.firestore.Timestamp.fromMillis(startAfterMs));
-      }
-      snap = await q.get();
-    } catch (err: any) {
-      usedFallback = true;
-      console.warn("[products GET] fallback sem orderBy createdAt:", err?.message);
-      let fallback: FirebaseFirestore.Query = adminDb
-        .collection("products")
-        .where("ownerId", "==", uid);
-      if (activeFilter !== null) fallback = fallback.where("active", "==", activeFilter);
-      snap = await fallback.limit(limit).get();
+    if (category) {
+      query = query.where("categoryCode", "==", category);
     }
+    if (activeParam === "true") query = query.where("active", "==", true);
+    if (activeParam === "false") query = query.where("active", "==", false);
 
-    const items = snap.docs.map((d) => {
-      const data = d.data() as any;
-      return {
-        id: d.id,
-        sku: data.sku ?? "",
-        name: data.name ?? "",
-        price: Number(data.price ?? 0),
-        stock: Number(data.stock ?? 0),
-        active: data.active !== false,
-        images: Array.isArray(data.images) ? data.images : [],
-        category: data.category ?? null,
-        category_source: data.category_source ?? null,
-        createdAt: data.createdAt?.toMillis?.() ?? null,
-      };
+    const snap = await query.limit(limit).get();
+    let items: Product[] = [];
+    snap.forEach((doc) => {
+      items.push(toProduct(doc.id, asRecord(doc.data())));
     });
 
-    let nextCursor: number | null = null;
-    if (!usedFallback && snap.docs.length === limit) {
-      const last = snap.docs[snap.docs.length - 1];
-      const lastTs = last?.get("createdAt");
-      const ms = typeof lastTs?.toMillis === "function" ? lastTs.toMillis() : null;
-      nextCursor = typeof ms === "number" ? ms : null;
+    // filtro de busca leve em memória (para q pequeno)
+    if (q) {
+      const nq = q.toLowerCase();
+      items = items.filter(
+        (p) =>
+          p.sku.toLowerCase().includes(nq) ||
+          (typeof p.name === "string" && p.name.toLowerCase().includes(nq))
+      );
     }
 
-    return json({ items, nextCursor });
-  } catch (e: any) {
-    if (e?.message === "NO_TOKEN") return json({ error: "Usuário não autenticado" }, 401);
-    console.error("[products GET] erro:", e);
-    return json({ error: e?.message ?? "Erro interno" }, 500);
+    return NextResponse.json(
+      { ok: true, count: items.length, items },
+      { status: 200, headers: { "Cache-Control": "no-store" } }
+    );
+  } catch (e: unknown) {
+    return NextResponse.json(
+      { ok: false, error: errMsg(e) },
+      { status: 400, headers: { "Cache-Control": "no-store" } }
+    );
   }
 }
 
-/** =============================== POST =============================== */
+/**
+ * POST /api/products
+ * Body JSON (mínimo): { sku: string, name: string, ...campos opcionais }
+ * Se o doc já existir, faz merge (upsert).
+ */
 export async function POST(req: NextRequest) {
   try {
-    const uid = await getUidFromHeader(req);
-    const body = await req.json().catch(() => ({}));
+    const bodyUnknown = await req.json().catch(() => ({}));
+    if (!bodyUnknown || typeof bodyUnknown !== "object") {
+      return NextResponse.json({ ok: false, error: "Body inválido" }, { status: 400 });
+    }
+    const patch = sanitizeUpsert(asRecord(bodyUnknown));
+    const sku = typeof patch.sku === "string" ? patch.sku.trim() : "";
+    const name = typeof patch.name === "string" ? patch.name.trim() : "";
 
-    // 1) helper consolidado (mantido)
-    let { sku: finalSku, category, category_source } = finalizeCategoryAndSku({
-      sku: typeof body.sku === "string" ? body.sku.trim() : "",
-      name: typeof body.name === "string" ? body.name.trim() : "",
-      category: typeof body.category === "string" ? body.category : null,
-    });
-
-    // 2) Alinha com CATEGORIAS DO USUÁRIO (prefixo e slug)
-    const { prefixToSlug, slugToPrefix } = await loadUserCategories(uid);
-
-    // 2a) Se SKU tiver prefixo que exista nas categorias do usuário, usa a categoria correspondente
-    const pfx = extractPrefixFromSku(finalSku || body.sku);
-    if (!category && pfx && prefixToSlug[pfx]) {
-      category = prefixToSlug[pfx];
-      category_source = "prefix";
-      if (!finalSku) finalSku = `${pfx}-`;
+    if (!sku || !name) {
+      return NextResponse.json(
+        { ok: false, error: "Campos 'sku' e 'name' são obrigatórios" },
+        { status: 400 }
+      );
     }
 
-    // 2b) Se veio "category" (slug) mas SKU ainda vazio, respeita o prefixo daquela categoria
-    if (category && !finalSku) {
-      const pref = slugToPrefix[category];
-      if (pref) finalSku = `${pref}-`;
-    }
-
-    const doc: any = {
-      ownerId: uid,
-      sku: finalSku,
-      name: typeof body.name === "string" ? body.name.trim() : "",
-      price: body.price !== undefined ? Number(body.price) : 0,
-      stock: body.stock !== undefined ? Number(body.stock) : 0,
-      active: typeof body.active === "boolean" ? body.active : true,
-      images: normalizeImagesDeep(body),
-      category: category ?? null,
-      category_source,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    };
-
-    if (!doc.name) return json({ error: "Nome é obrigatório" }, 400);
-
-    const ref = await adminDb.collection("products").add(doc);
-    const data = (await ref.get()).data() as any;
-
-    return json(
+    const now = new Date();
+    const docRef = adminDb.collection("products").doc(sku);
+    await docRef.set(
       {
-        id: ref.id,
-        sku: data.sku ?? "",
-        name: data.name ?? "",
-        price: Number(data.price ?? 0),
-        stock: Number(data.stock ?? 0),
-        active: data.active !== false,
-        images: Array.isArray(data.images) ? data.images : [],
-        category: data.category ?? null,
-        category_source: data.category_source ?? null,
-        createdAt: data.createdAt?.toMillis?.() ?? null,
+        ...patch,
+        sku,
+        name,
+        updatedAt: now,
+        createdAt: now, // permanece se já existir
       },
-      201
+      { merge: true }
     );
-  } catch (e: any) {
-    if (e?.message === "NO_TOKEN") return json({ error: "Usuário não autenticado" }, 401);
-    console.error("[products POST] erro:", e);
-    return json({ error: e?.message ?? "Erro interno" }, 500);
+
+    const fresh = await docRef.get();
+    const data = toProduct(fresh.id, asRecord(fresh.data()));
+    return NextResponse.json({ ok: true, item: data }, { status: 200, headers: { "Cache-Control": "no-store" } });
+  } catch (e: unknown) {
+    return NextResponse.json(
+      { ok: false, error: errMsg(e) },
+      { status: 400, headers: { "Cache-Control": "no-store" } }
+    );
   }
 }
 
-/** =============================== PUT =============================== */
-export async function PUT(req: NextRequest) {
-  try {
-    const uid = await getUidFromHeader(req);
-    const body = await req.json().catch(() => ({}));
-    const id = typeof body.id === "string" ? body.id.trim() : "";
-    if (!id) return json({ error: "ID é obrigatório" }, 400);
-
-    // 1) helper consolidado (mantido)
-    let { sku: finalSku, category, category_source } = finalizeCategoryAndSku({
-      sku: typeof body.sku === "string" ? body.sku.trim() : "",
-      name: typeof body.name === "string" ? body.name.trim() : "",
-      category: typeof body.category === "string" ? body.category : null,
-    });
-
-    // 2) Reconciliar com as CATEGORIAS DO USUÁRIO
-    const { prefixToSlug, slugToPrefix } = await loadUserCategories(uid);
-
-    const pfx = extractPrefixFromSku(finalSku || body.sku);
-    if (!category && pfx && prefixToSlug[pfx]) {
-      category = prefixToSlug[pfx];
-      category_source = "prefix";
-    }
-    if (category && !finalSku) {
-      const pref = slugToPrefix[category];
-      if (pref) finalSku = `${pref}-`;
-    }
-
-    const patch: any = {
-      ...(body.name !== undefined ? { name: String(body.name).trim() } : {}),
-      ...(body.price !== undefined ? { price: Number(body.price) } : {}),
-      ...(body.stock !== undefined ? { stock: Number(body.stock) } : {}),
-      ...(body.active !== undefined ? { active: Boolean(body.active) } : {}),
-      ...(body.images !== undefined ? { images: normalizeImagesDeep(body) } : {}),
-      ...(finalSku !== undefined ? { sku: finalSku } : {}),
-      category: category ?? null,
-      category_source,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      ownerId: uid,
-    };
-
-    await adminDb.collection("products").doc(id).set(patch, { merge: true });
-    const data = (await adminDb.collection("products").doc(id).get()).data() as any;
-
-    return json(
-      {
-        id,
-        sku: data.sku ?? "",
-        name: data.name ?? "",
-        price: Number(data.price ?? 0),
-        stock: Number(data.stock ?? 0),
-        active: data.active !== false,
-        images: Array.isArray(data.images) ? data.images : [],
-        category: data.category ?? null,
-        category_source: data.category_source ?? null,
-        createdAt: data.createdAt?.toMillis?.() ?? null,
-      },
-      200
-    );
-  } catch (e: any) {
-    if (e?.message === "NO_TOKEN") return json({ error: "Usuário não autenticado" }, 401);
-    console.error("[products PUT] erro:", e);
-    return json({ error: e?.message ?? "Erro interno" }, 500);
-  }
-}
-
-/** =============================== DELETE =============================== */
-export async function DELETE(req: NextRequest) {
-  try {
-    const uid = await getUidFromHeader(req);
-    const { searchParams } = new URL(req.url);
-    const id = (searchParams.get("id") || "").trim();
-    if (!id) return json({ error: "ID é obrigatório" }, 400);
-
-    const ref = adminDb.collection("products").doc(id);
-    const snap = await ref.get();
-    if (!snap.exists) return json({ error: "Produto não encontrado" }, 404);
-    if ((snap.data() as any)?.ownerId !== uid) return json({ error: "Proibido" }, 403);
-
-    await ref.delete();
-    return json({ ok: true });
-  } catch (e: any) {
-    if (e?.message === "NO_TOKEN") return json({ error: "Usuário não autenticado" }, 401);
-    console.error("[products DELETE] erro:", e);
-    return json({ error: e?.message ?? "Erro interno" }, 500);
-  }
+export async function OPTIONS() {
+  return new NextResponse(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Cache-Control": "no-store",
+    },
+  });
 }
