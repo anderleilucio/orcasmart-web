@@ -1,16 +1,17 @@
 // src/app/auth/login/page.tsx
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { auth } from "@/lib/firebase";
-import {
-  onAuthStateChanged,
-  signInWithEmailAndPassword,
-} from "firebase/auth";
+import { onAuthStateChanged, signInWithEmailAndPassword } from "firebase/auth";
 
-export default function LoginPage() {
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null;
+}
+
+function LoginInner() {
   const router = useRouter();
   const qp = useSearchParams();
 
@@ -42,12 +43,16 @@ export default function LoginPage() {
       }
       await signInWithEmailAndPassword(auth, email.trim(), senha);
       // redirecionamento ocorre no onAuthStateChanged
-    } catch (err: any) {
-      let msg = err?.message || "Falha ao entrar.";
-      // mensagens mais amigáveis
-      if (err?.code === "auth/invalid-credential") msg = "E-mail ou senha inválidos.";
-      if (err?.code === "auth/too-many-requests") msg = "Muitas tentativas. Tente novamente em instantes.";
-      if (err?.code === "auth/network-request-failed") msg = "Sem conexão. Verifique sua internet.";
+    } catch (err: unknown) {
+      let msg = "Falha ao entrar.";
+      if (isRecord(err)) {
+        if (typeof err.message === "string") msg = err.message;
+        if (typeof err.code === "string") {
+          if (err.code === "auth/invalid-credential") msg = "E-mail ou senha inválidos.";
+          if (err.code === "auth/too-many-requests") msg = "Muitas tentativas. Tente novamente em instantes.";
+          if (err.code === "auth/network-request-failed") msg = "Sem conexão. Verifique sua internet.";
+        }
+      }
       setErro(msg);
     } finally {
       setLoading(false);
@@ -113,16 +118,10 @@ export default function LoginPage() {
         </form>
 
         <div className="mt-4 flex items-center justify-between text-sm">
-          <Link
-            href="/auth/reset"
-            className="text-violet-700 hover:underline"
-          >
+          <Link href="/auth/reset" className="text-violet-700 hover:underline">
             Esqueci minha senha
           </Link>
-          <Link
-            href="/auth/register"
-            className="text-slate-700 hover:underline"
-          >
+          <Link href="/auth/register" className="text-slate-700 hover:underline">
             Criar conta
           </Link>
         </div>
@@ -132,5 +131,13 @@ export default function LoginPage() {
         </p>
       </div>
     </main>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={<div>Carregando...</div>}>
+      <LoginInner />
+    </Suspense>
   );
 }
