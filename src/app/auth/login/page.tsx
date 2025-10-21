@@ -1,12 +1,14 @@
 // src/app/auth/login/page.tsx
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
+import { useEffect, useState } from "react";
 import { auth } from "@/lib/firebase";
 import { onAuthStateChanged, signInWithEmailAndPassword } from "firebase/auth";
 
+// helper para checar se é objeto
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null;
 }
@@ -18,11 +20,10 @@ function LoginInner() {
   const [email, setEmail] = useState("");
   const [senha, setSenha] = useState("");
   const [showPwd, setShowPwd] = useState(false);
-
   const [erro, setErro] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  // se já estiver logado, redireciona
+  // Redireciona se já estiver logado
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
       if (u) {
@@ -33,24 +34,26 @@ function LoginInner() {
     return () => unsub();
   }, [router, qp]);
 
-  async function onSubmit(e: React.FormEvent) {
+  async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setErro(null);
     setLoading(true);
+
     try {
-      if (!email.trim() || !senha) {
-        throw new Error("Informe e-mail e senha.");
-      }
+      if (!email.trim() || !senha) throw new Error("Informe e-mail e senha.");
       await signInWithEmailAndPassword(auth, email.trim(), senha);
-      // redirecionamento ocorre no onAuthStateChanged
+      // redirecionamento via onAuthStateChanged
     } catch (err: unknown) {
       let msg = "Falha ao entrar.";
       if (isRecord(err)) {
         if (typeof err.message === "string") msg = err.message;
         if (typeof err.code === "string") {
-          if (err.code === "auth/invalid-credential") msg = "E-mail ou senha inválidos.";
-          if (err.code === "auth/too-many-requests") msg = "Muitas tentativas. Tente novamente em instantes.";
-          if (err.code === "auth/network-request-failed") msg = "Sem conexão. Verifique sua internet.";
+          if (err.code === "auth/invalid-credential")
+            msg = "E-mail ou senha inválidos.";
+          if (err.code === "auth/too-many-requests")
+            msg = "Muitas tentativas. Tente novamente em instantes.";
+          if (err.code === "auth/network-request-failed")
+            msg = "Sem conexão. Verifique sua internet.";
         }
       }
       setErro(msg);
@@ -64,7 +67,9 @@ function LoginInner() {
       <div className="w-full max-w-md rounded-2xl border p-6 shadow-sm">
         <div className="mb-6 text-center">
           <h1 className="text-2xl font-bold">Entrar</h1>
-          <p className="text-sm text-slate-600">Acesse sua conta do OrcaSmart</p>
+          <p className="text-sm text-slate-600">
+            Acesse sua conta do OrçaSmart
+          </p>
         </div>
 
         {erro && (

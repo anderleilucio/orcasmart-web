@@ -7,19 +7,21 @@ import { auth } from "@/lib/firebase";
 import { uploadProductImage } from "@/lib/uploadImage";
 import useCatalogSuggest, { SuggestResponse } from "@/hooks/useCatalogSuggest";
 
+// ===== Tipagem das linhas =====
 type Row = {
   id: string;
   name: string;
   sku: string;
   category: string | null;
-  image_url: string; // uma URL por linha (o importador usa "Imagens" com uma URL)
+  image_url: string;
   unit: string;
-  price: string; // "0,00" na UI; no CSV vamos exportar 0.00
+  price: string;
   stock: string;
   active: boolean;
   note?: string;
 };
 
+// ===== Utilitários =====
 function getErrMsg(err: unknown): string {
   if (err instanceof Error) return err.message;
   try {
@@ -33,20 +35,25 @@ function stripExtAndNormalize(s: string) {
   const noExt = (s || "").replace(/\.[a-z0-9]+$/i, "");
   return noExt.replace(/[_\-]+/g, " ").replace(/\s+/g, " ").trim();
 }
+
 function derivePrefixFromSku(sku: string): string | null {
   const m = (sku || "").toUpperCase().match(/^([A-Z]{2,5})[-_]/);
   return m ? m[1] : null;
 }
+
 function pad(n: number, width = 4) {
   const s = String(n);
   return s.length >= width ? s : "0".repeat(width - s.length) + s;
 }
+
 function parseMoneyText(t: string) {
   if (!t) return 0;
   const norm = t.replace(/\./g, "").replace(",", ".");
   const num = parseFloat(norm);
   return Number.isFinite(num) ? num : 0;
 }
+
+// fetch autenticado via Firebase
 async function authedFetch(input: RequestInfo | URL, init?: RequestInit) {
   const user = auth.currentUser;
   if (!user) throw new Error("Faça login para continuar.");
@@ -61,22 +68,19 @@ async function authedFetch(input: RequestInfo | URL, init?: RequestInit) {
   });
 }
 
-// Sanitiza SKU para evitar “vazio” no CSV por hifens especiais/espaços invisíveis
+// sanitiza SKUs
 function sanitizeSku(s: string) {
   const cleaned = (s ?? "")
     .toString()
     .normalize("NFKC")
-    // remove invisíveis comuns (NBSP/ZWSP/ZWNJ/ZWJ/BOM)
     .replace(/[\u00A0\u200B\u200C\u200D\uFEFF]/g, "")
-    // todos os tipos de traço para hífen ASCII
-    .replace(/[\u2010\u2011\u2012\u2013\u2014\u2212]/g, "-")
+    .replace(/[\u2010-\u2014\u2212]/g, "-")
     .toUpperCase()
     .trim();
-  // mantém apenas A-Z, 0-9 e hífen
   return cleaned.replace(/[^A-Z0-9-]/g, "");
 }
 
-// ---------- Fallback local simples (palavras-chave → prefixo) ----------
+// ===== Palavras-chave locais para prefixos =====
 function norm(s: string) {
   return (s || "")
     .toLowerCase()
@@ -85,13 +89,13 @@ function norm(s: string) {
 }
 
 const LOCAL_KEYWORDS: Array<{ prefix: string; terms: string[] }> = [
-  { prefix: "TIN", terms: ["tinta", "suvinil", "coral", "latex", "laitex", "pva", "acrilica", "verniz", "selador"] },
-  { prefix: "ALV", terms: ["bloco", "blocos", "tijolo", "tijolos", "cimento", "argamassa", "areia", "brita", "pedra", "concreto"] },
+  { prefix: "TIN", terms: ["tinta", "suvinil", "coral", "latex", "pva", "acrilica", "verniz", "selador"] },
+  { prefix: "ALV", terms: ["bloco", "tijolo", "cimento", "argamassa", "areia", "brita", "pedra", "concreto"] },
   { prefix: "INS", terms: ["lixa", "prego", "parafuso", "bucha", "silicone", "cola"] },
-  { prefix: "FER", terms: ["ferro", "vergalhao", "aço", "aco"] },
+  { prefix: "FER", terms: ["ferro", "vergalhao", "aco", "aço"] },
   { prefix: "ELE", terms: ["cabo", "fio", "tomada", "interruptor", "disjuntor", "eletroduto"] },
   { prefix: "HID", terms: ["tubo", "cano", "pvc", "torneira", "ralo", "joelho", "conexao", "registro"] },
-  { prefix: "ILU", terms: ["lampada", "lâmpada", "luminaria", "spot", "led", "refletor"] },
+  { prefix: "ILU", terms: ["lampada", "luminaria", "spot", "led", "refletor"] },
   { prefix: "PIS", terms: ["piso", "porcelanato", "ceramica"] },
   { prefix: "REV", terms: ["revestimento", "azulejo", "pastilha"] },
   { prefix: "MAD", terms: ["madeira", "porta", "batente", "rodape"] },
@@ -99,25 +103,23 @@ const LOCAL_KEYWORDS: Array<{ prefix: string; terms: string[] }> = [
 
 function guessPrefixLocally(name: string): string | null {
   const target = norm(name);
-  // dá preferência para termos mais longos
-  const entries: Array<{ prefix: string; term: string }> = [];
-  for (const g of LOCAL_KEYWORDS) for (const t of g.terms) entries.push({ prefix: g.prefix, term: t });
-  entries.sort((a, b) => b.term.length - a.term.length);
-  for (const e of entries) {
-    if (target.includes(norm(e.term))) return e.prefix;
+  for (const g of LOCAL_KEYWORDS) {
+    for (const t of g.terms) {
+      if (target.includes(norm(t))) return g.prefix;
+    }
   }
   return null;
 }
 
+// ===== Componente principal =====
 export default function UploadImagens() {
   const { suggestOne } = useCatalogSuggest();
-
   const [rows, setRows] = useState<Row[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [prefixMaxFromCatalog, setPrefixMaxFromCatalog] = useState<Record<string, number>>({});
 
-  // Carrega rapidamente o catálogo para descobrir o maior número por prefixo
+  // ---- carrega catálogo para pegar prefixos existentes ----
   useEffect(() => {
     (async () => {
       try {
@@ -131,35 +133,32 @@ export default function UploadImagens() {
           const mNum = sku.match(/^[A-Z]{2,5}[-_](\d{1,})$/);
           if (pfx && mNum) {
             const num = parseInt(mNum[1], 10);
-            if (Number.isFinite(num)) {
-              if (!maxMap[pfx] || num > maxMap[pfx]) maxMap[pfx] = num;
-            }
+            if (!maxMap[pfx] || num > maxMap[pfx]) maxMap[pfx] = num;
           }
         }
         setPrefixMaxFromCatalog(maxMap);
-      } catch (e: unknown) {
-        // apenas loga em dev
-        // eslint-disable-next-line no-console
-        console.warn("Não foi possível carregar catálogo p/ numerar SKU:", getErrMsg(e));
+      } catch (e) {
+        console.warn("Não foi possível carregar catálogo:", getErrMsg(e));
       }
     })();
   }, []);
 
+  // ---- upload de arquivos ----
   async function onFilesSelected(e: React.ChangeEvent<HTMLInputElement>) {
     const files = e.target.files ? Array.from(e.target.files) : [];
     if (!files.length) return;
 
     setBusy(true);
     setError(null);
+
     try {
       const user = auth.currentUser;
       if (!user) throw new Error("Faça login para continuar.");
 
-      // contador local por prefixo para ESTE lote (evita duplicar -0001)
-      const localMax: Record<string, number> = { ...prefixMaxFromCatalog };
+      const localMax = { ...prefixMaxFromCatalog };
       for (const r of rows) {
         const pfx = derivePrefixFromSku(r.sku || "");
-        const m = r.sku.match(/^[A-Z]{2,5}[-_](\d{1,})$/);
+        const m = r.sku.match(/^[A-Z]{2,5}[-_](\d+)/);
         if (pfx && m) {
           const n = parseInt(m[1], 10);
           if (!localMax[pfx] || n > localMax[pfx]) localMax[pfx] = n;
@@ -169,44 +168,24 @@ export default function UploadImagens() {
       const additions: Row[] = [];
       for (const file of files) {
         const baseName = stripExtAndNormalize(file.name);
+        let suggest: SuggestResponse = { category: null, prefix: null, source: "none", confidence: 0 };
 
-        let suggest: SuggestResponse = {
-          category: null,
-          prefix: null,
-          source: "none",
-          confidence: 0,
-        };
-        // 1ª tentativa: filename
         try {
           suggest = await suggestOne({ filename: baseName });
-        } catch {
-          // silencioso
-        }
+        } catch {}
 
-        // 2ª tentativa: name (alguns casos casam melhor)
         if (!suggest?.prefix) {
           try {
             const s2 = await suggestOne({ name: baseName });
             if (s2?.prefix) suggest = s2;
-          } catch {
-            // silencioso
-          }
+          } catch {}
         }
 
-        // 3º fallback local (cliente)
         if (!suggest?.prefix) {
           const local = guessPrefixLocally(baseName);
-          if (local) {
-            suggest = {
-              category: null, // não temos o slug aqui, só o prefixo
-              prefix: local,
-              source: "keyword",
-              confidence: 0.6,
-            };
-          }
+          if (local) suggest = { category: null, prefix: local, source: "keyword", confidence: 0.6 };
         }
 
-        // monta SKU se tiver prefixo sugerido
         let sku = "";
         if (suggest.prefix) {
           const p = suggest.prefix.toUpperCase();
@@ -237,7 +216,7 @@ export default function UploadImagens() {
       }
 
       setRows((prev) => [...prev, ...additions]);
-    } catch (e: unknown) {
+    } catch (e) {
       setError(getErrMsg(e) || "Falha ao processar imagens");
     } finally {
       setBusy(false);
@@ -245,6 +224,7 @@ export default function UploadImagens() {
     }
   }
 
+  // ---- edição de linhas ----
   function updateRow(id: string, patch: Partial<Row>) {
     setRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
   }
@@ -252,14 +232,14 @@ export default function UploadImagens() {
     setRows((prev) => prev.filter((r) => r.id !== id));
   }
 
-  // Garante SKU para todos antes de exportar
-  const ensureSkusForAll = async () => {
+  // ---- exportar CSV ----
+  async function ensureSkusForAll() {
     const updated: Row[] = [];
-    // estado máximo por prefixo, recalculado aqui
     const max: Record<string, number> = { ...prefixMaxFromCatalog };
+
     for (const r of rows) {
       const pfx = derivePrefixFromSku(r.sku || "");
-      const m = r.sku.match(/^[A-Z]{2,5}[-_](\d{1,})$/);
+      const m = r.sku.match(/^[A-Z]{2,5}[-_](\d+)/);
       if (pfx && m) {
         const n = parseInt(m[1], 10);
         if (!max[pfx] || n > max[pfx]) max[pfx] = n;
@@ -271,37 +251,26 @@ export default function UploadImagens() {
       if (!sku) {
         let prefix: string | null = null;
         try {
-          // usa 'name' (o hook não aceita 'text')
           const s = await suggestOne({ name: r.name || "", sku: r.sku });
           prefix = s?.prefix ? s.prefix.toUpperCase() : null;
-        } catch {
-          prefix = null;
-        }
-        // fallback local também no CSV
+        } catch {}
         if (!prefix) prefix = guessPrefixLocally(r.name || "") || null;
-
         if (prefix) {
           const next = (max[prefix] || 0) + 1;
           max[prefix] = next;
           sku = `${prefix}-${pad(next)}`;
-        } else {
-          // ✅ fallback quando NÃO houver correspondência
-          sku = "SKU-";
-        }
+        } else sku = "SKU-";
       }
       updated.push({ ...r, sku });
     }
     setRows(updated);
     return updated;
-  };
+  }
 
-  // CSV (com sanitização de SKU)
   async function downloadCSV() {
     const ready = await ensureSkusForAll();
-
     const headers = ["SKU", "Nome", "Preco", "Estoque", "Ativo", "Unidade", "Imagens"];
     const esc = (s: string) => `"${(s ?? "").replace(/"/g, '""')}"`;
-
     const lines = [
       headers.join(","),
       ...ready.map((r) => {
@@ -344,7 +313,6 @@ export default function UploadImagens() {
           <span className="text-sm">Enviar imagens:</span>
         </label>
         <input type="file" multiple onChange={onFilesSelected} />
-
         <button
           onClick={downloadCSV}
           disabled={!anyRows || busy}
@@ -371,7 +339,7 @@ export default function UploadImagens() {
                     fill
                     sizes="112px"
                     className="rounded-md object-contain border"
-                    unoptimized={!r.image_url.startsWith("/")}
+                    unoptimized
                   />
                 </div>
 
@@ -438,21 +406,22 @@ export default function UploadImagens() {
               </div>
 
               <div className="mt-2 text-xs">
-                <div className="truncate">
-                  <a
-                    className="break-all text-slate-700 underline"
-                    href={r.image_url}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    {r.image_url}
-                  </a>
-                </div>
+                <a
+                  className="break-all text-slate-700 underline"
+                  href={r.image_url}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {r.image_url}
+                </a>
                 {r.note && <div className="mt-1 text-slate-500">{r.note}</div>}
               </div>
 
               <div className="mt-2">
-                <button onClick={() => removeRow(r.id)} className="rounded-md border px-3 py-1.5 text-sm">
+                <button
+                  onClick={() => removeRow(r.id)}
+                  className="rounded-md border px-3 py-1.5 text-sm"
+                >
                   Remover
                 </button>
               </div>

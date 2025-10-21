@@ -3,7 +3,8 @@
     "origin": [
       "http://localhost:3000",
       "http://127.0.0.1:3000",
-      "https://seu-dominio.com.br"
+      "https://orcasmart-web.vercel.app",
+      "https://orcasmart.com.br"
     ],
     "method": ["GET", "HEAD", "PUT", "POST", "DELETE", "OPTIONS"],
     "responseHeader": ["Authorization", "Content-Type", "x-goog-meta-*"],
