@@ -312,7 +312,7 @@ export default function UploadImagens() {
         <label className="inline-flex items-center gap-2">
           <span className="text-sm">Enviar imagens:</span>
         </label>
-        <input type="file" multiple onChange={onFilesSelected} />
+        <input type="file" accept="image/*" multiple onChange={onFilesSelected} />
         <button
           onClick={downloadCSV}
           disabled={!anyRows || busy}
