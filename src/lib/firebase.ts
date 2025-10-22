@@ -1,34 +1,35 @@
 // src/lib/firebase.ts
-// Módulos CLIENTE para usar no navegador (App Router / componentes "use client")
-
-import { initializeApp, getApps } from "firebase/app";
+import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 import { getStorage } from "firebase/storage";
 
+const projectId = process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID!;
+const storageBucketEnv =
+  process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET ||
+  `${projectId}.firebasestorage.app`; // <- garante domínio correto
+
 const firebaseConfig = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY!,
   authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN!,
-  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID!,
-  // usar SEMPRE o domínio .firebasestorage.app no client
-  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET!, // ex: orcasmart-57561.firebasestorage.app
+  projectId,
+  storageBucket: storageBucketEnv, // <- usa .firebasestorage.app
+  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID!,
+  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID!,
+  measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID,
 };
 
-// Evita reinicialização em HMR (dev)
-const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
+if (storageBucketEnv.endsWith(".appspot.com")) {
+  // ajuda a detectar build antigo / variável faltando
+  console.warn(
+    "[Firebase] storageBucket deveria terminar com .firebasestorage.app, mas está:",
+    storageBucketEnv
+  );
+}
 
-// Serviços CLIENT
+const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
+
 export const auth = getAuth(app);
 export const db = getFirestore(app);
+// não precisa passar bucket manualmente — já vem do config acima
 export const storage = getStorage(app);
-
-// (Opcional) Aviso útil se o bucket estiver errado
-if (typeof window !== "undefined") {
-  const expected = "firebasestorage.app";
-  if (!firebaseConfig.storageBucket.endsWith(expected)) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      `[Firebase] storageBucket esperado com domínio .${expected}. Atual: ${firebaseConfig.storageBucket}`
-    );
-  }
-}
