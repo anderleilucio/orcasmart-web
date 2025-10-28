@@ -1,4 +1,3 @@
-// src/app/vendedor/produtos/page.tsx
 "use client";
 
 import Link from "next/link";
@@ -27,10 +26,12 @@ type SortKey =
 
 export default function ProdutosPage() {
   const router = useRouter();
-
-  // ---------------- Auth ----------------
   const [user, setUser] = useState<User | null>(null);
   const [checking, setChecking] = useState(true);
+  const [items, setItems] = useState<Prod[]>([]);
+  const [erro, setErro] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [toast, setToast] = useState<string | null>(null);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
@@ -41,40 +42,13 @@ export default function ProdutosPage() {
     return () => unsub();
   }, [router]);
 
-  // ---------------- Dados ----------------
-  const [items, setItems] = useState<Prod[]>([]);
-  const [erro, setErro] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [toast, setToast] = useState<string | null>(null);
-
-  // ---------------- Toast ----------------
-  useEffect(() => {
-    const t =
-      typeof window !== "undefined"
-        ? localStorage.getItem("orcasmart_toast")
-        : null;
-    if (t) {
-      setToast(t);
-      localStorage.removeItem("orcasmart_toast");
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!toast) return;
-    const tm = setTimeout(() => setToast(null), 2200);
-    return () => clearTimeout(tm);
-  }, [toast]);
-
-  // ---------------- Filtros ----------------
   const [query, setQuery] = useState("");
-  // ✅ padrão: mostrar TODOS
   const [statusFilter, setStatusFilter] =
     useState<"all" | "active" | "inactive">("all");
   const [sortKey, setSortKey] = useState<SortKey>("name-asc");
 
-  // ---------------- Normalizador ----------------
   function normalizeApiItem(x: any): Prod {
-    const id: string =
+    const id =
       x.id ||
       x.docId ||
       x._id ||
@@ -83,42 +57,16 @@ export default function ProdutosPage() {
       (typeof crypto !== "undefined"
         ? crypto.randomUUID()
         : `${x.sku}-${Math.random()}`);
-
-    const imageUrls: string[] = Array.isArray(x.imageUrls)
+    const imageUrls = Array.isArray(x.imageUrls)
       ? x.imageUrls.filter((u: any) => typeof u === "string" && u)
-      : Array.isArray(x.images)
-      ? x.images.filter((u: any) => typeof u === "string" && u)
-      : typeof x.image === "string" && x.image
-      ? [x.image]
-      : typeof x.imageUrl === "string" && x.imageUrl
-      ? [x.imageUrl]
       : [];
-
-    const price =
-      typeof x.price === "number"
-        ? x.price
-        : Number.isFinite(Number(x.price))
-        ? Number(x.price)
-        : 0;
-
-    const stock =
-      typeof x.stock === "number"
-        ? x.stock
-        : Number.isFinite(Number(x.stock))
-        ? Number(x.stock)
-        : 0;
-
-    const active =
-      typeof x.active === "boolean"
-        ? x.active
-        : typeof x.ativo === "boolean"
-        ? x.ativo
-        : true;
-
+    const price = Number(x.price ?? 0);
+    const stock = Number(x.stock ?? 0);
+    const active = x.active !== false;
     return {
       id,
       sku: String(x.sku ?? ""),
-      name: String(x.name ?? x.nome ?? ""),
+      name: String(x.name ?? ""),
       price,
       stock,
       active,
@@ -126,83 +74,19 @@ export default function ProdutosPage() {
     };
   }
 
-  // ---------------- Exportar CSV (força download) ----------------
-  async function exportCsv() {
-    try {
-      const uid = auth.currentUser?.uid;
-      if (!uid) return alert("Faça login para exportar.");
-
-      const token = await auth.currentUser?.getIdToken().catch(() => undefined);
-      const url = `/api/catalog/export?format=csv&section=all&sellerId=${encodeURIComponent(
-        uid
-      )}&_=${Date.now()}`;
-
-      const res = await fetch(url, {
-        method: "GET",
-        cache: "no-store",
-        headers: {
-          "Cache-Control": "no-store",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          Accept: "text/csv,*/*",
-        },
-      });
-
-      if (!res.ok) {
-        let msg = `Falha ao exportar (HTTP ${res.status})`;
-        try {
-          const j = await res.json();
-          msg = j?.error || msg;
-        } catch {}
-        throw new Error(msg);
-      }
-
-      const blob = await res.blob();
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = "catalogo_orcasmart.csv";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(a.href);
-    } catch (e: any) {
-      setErro(e?.message || "Falha ao exportar CSV");
-    }
-  }
-
-  // ---------------- Busca produtos (via /api/products) ----------------
   async function fetchProducts(uid: string) {
     const token = await auth.currentUser?.getIdToken();
-
-    const url = `/api/products?ownerId=${encodeURIComponent(
-      uid
-    )}&limit=200&order=updatedAt&_=${Date.now()}`;
-
+    const url = `/api/products?ownerId=${encodeURIComponent(uid)}&limit=200&_=${Date.now()}`;
     const res = await fetch(url, {
-      method: "GET",
+      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
       cache: "no-store",
-      headers: {
-        "Cache-Control": "no-store",
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      next: { revalidate: 0 },
     });
-
-    let body: any = {};
-    try {
-      body = await res.json();
-    } catch {
-      throw new Error(`HTTP ${res.status}`);
-    }
-
-    if (!res.ok || body?.ok === false) {
-      throw new Error(body?.error ?? `HTTP ${res.status}`);
-    }
-
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body?.error ?? `HTTP ${res.status}`);
     const listRaw: any[] = Array.isArray(body.items) ? body.items : [];
     return listRaw.map(normalizeApiItem);
   }
 
-  // ---------------- Carrega ----------------
   const loadProducts = useCallback(async () => {
     if (!user) return;
     setErro(null);
@@ -222,14 +106,6 @@ export default function ProdutosPage() {
     if (user?.uid) loadProducts();
   }, [user?.uid, loadProducts]);
 
-  useEffect(() => {
-    const unsub = auth.onIdTokenChanged((u) => {
-      if (u) loadProducts();
-    });
-    return () => unsub();
-  }, [loadProducts]);
-
-  // ---------------- Filtro/ordenação ----------------
   const visibleItems = useMemo(() => {
     const q = query.trim().toLowerCase();
     const filtered = (items ?? []).filter((p) => {
@@ -254,13 +130,13 @@ export default function ProdutosPage() {
         case "name-desc":
           return (b.name || "").localeCompare(a.name || "", "pt-BR");
         case "price-asc":
-          return Number(a.price) - Number(b.price);
+          return a.price - b.price;
         case "price-desc":
-          return Number(b.price) - Number(a.price);
+          return b.price - a.price;
         case "stock-asc":
-          return Number(a.stock ?? 0) - Number(b.stock ?? 0);
+          return a.stock - b.stock;
         case "stock-desc":
-          return Number(b.stock ?? 0) - Number(a.stock ?? 0);
+          return b.stock - a.stock;
         default:
           return 0;
       }
@@ -268,14 +144,13 @@ export default function ProdutosPage() {
     return sorted;
   }, [items, query, statusFilter, sortKey]);
 
-  // ---------------- UI ----------------
   if (checking) return <main className="p-6">Carregando…</main>;
   if (!user) return null;
 
   return (
     <main className="max-w-6xl mx-auto p-6 space-y-6">
       {toast && (
-        <div className="mb-4 rounded-lg border border-green-300 bg-green-50 px-4 py-2 text-green-700 text-sm">
+        <div className="rounded-lg border border-green-300 bg-green-50 px-4 py-2 text-green-700 text-sm">
           {toast}
         </div>
       )}
@@ -287,17 +162,8 @@ export default function ProdutosPage() {
         </div>
 
         <div className="flex items-center gap-2">
-          {/* ✅ Exportar CSV (com download e Bearer) */}
-          <button
-            onClick={exportCsv}
-            className="rounded-lg border px-4 py-2.5 text-sm"
-            title="Exportar CSV"
-          >
-            Exportar CSV
-          </button>
-
           <Link
-            href="/vendedor/produtos/importar"
+            href="/vendedor/produtos/importar-csv"
             className="rounded-lg border px-4 py-2.5 text-sm"
           >
             Importar CSV
@@ -369,7 +235,7 @@ export default function ProdutosPage() {
             <button
               onClick={() => {
                 setQuery("");
-                setStatusFilter("all"); // volta para “Todos”
+                setStatusFilter("all");
                 setSortKey("name-asc");
                 loadProducts();
               }}
@@ -404,10 +270,11 @@ export default function ProdutosPage() {
                 )}
                 <div>
                   <div className="font-medium">
-                    {p.name} <span className="opacity-60">— {p.sku}</span>
+                    {p.name}{" "}
+                    <span className="opacity-60">— {p.sku}</span>
                   </div>
                   <div className="text-sm opacity-70">
-                    R{"$ "}
+                    R$
                     {Number(p.price).toLocaleString("pt-BR", {
                       minimumFractionDigits: 2,
                     })}{" "}
