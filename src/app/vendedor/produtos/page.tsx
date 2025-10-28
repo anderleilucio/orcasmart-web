@@ -7,26 +7,52 @@ import { useRouter } from "next/navigation";
 import { auth } from "@/lib/firebase";
 import { onAuthStateChanged, User } from "firebase/auth";
 
-/** ---------- Helpers de imagem ---------- */
+/** ---------- Helpers ---------- */
 // Conserta URLs do Firebase Storage para uso direto em <img>
 function fixImageUrl(u?: string): string | undefined {
   if (!u) return u;
-
-  // 1) trocar domínio .firebasestorage.app -> API de download googleapis.com
+  // .firebasestorage.app -> API googleapis
   u = u.replace(
     /^https:\/\/([^/]+)\.firebasestorage\.app\/o\//,
     "https://firebasestorage.googleapis.com/v0/b/$1/o/"
   );
-
-  // 2) garantir ?alt=media nas URLs da API
+  // garante ?alt=media
   if (
     /^https:\/\/firebasestorage\.googleapis\.com\/v0\/b\/[^/]+\/o\//.test(u) &&
     !/[?&]alt=media\b/.test(u)
   ) {
     u += (u.includes("?") ? "&" : "?") + "alt=media";
   }
-
   return u;
+}
+
+// Converte qualquer formato (string/array/campos alternativos) em array de URLs
+function coerceImageUrls(x: any): string[] {
+  const raw =
+    x?.imageUrls ??
+    x?.images ??
+    x?.imagens ??
+    x?.imageUrl ??
+    x?.imageURL ??
+    x?.imagem ??
+    x?.image ??
+    [];
+
+  const list = Array.isArray(raw)
+    ? raw
+    : String(raw || "")
+        .split(/\n|;|,|\|/g)
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+  // remove vazios/duplicados
+  return Array.from(
+    new Set(
+      list
+        .filter((u) => typeof u === "string" && u.length > 0)
+        .map((u) => u.trim())
+    )
+  );
 }
 
 type Prod = {
@@ -73,48 +99,34 @@ export default function ProdutosPage() {
 
   function normalizeApiItem(x: any): Prod {
     const id =
-      x.id ||
-      x.docId ||
-      x._id ||
-      x.refId ||
-      x.sku ||
+      x?.id ||
+      x?.docId ||
+      x?._id ||
+      x?.refId ||
+      x?.sku ||
       (typeof crypto !== "undefined"
         ? crypto.randomUUID()
-        : `${x.sku}-${Math.random()}`);
+        : `${x?.sku}-${Math.random()}`);
 
-    // normaliza imageUrls (aceita string ou array) e corrige domínio/alt=media
-    const rawImgs =
-      x.imageUrls ??
-      x.images ??
-      x.imagens ??
-      (typeof x.image === "string" ? [x.image] : []);
+    // aceita qualquer campo e converte para array
+    const imageUrls = coerceImageUrls(x);
 
-    const imageUrls: string[] = Array.isArray(rawImgs)
-      ? rawImgs
-          .filter((u: any) => typeof u === "string" && u.trim())
-          .map((u: string) => fixImageUrl(u)!)
-      : String(rawImgs || "")
-          .split(/\n|;|,|\|/g)
-          .map((s) => s.trim())
-          .filter(Boolean)
-          .map((u) => fixImageUrl(u)!);
-
+    // image (se vier vazio, usa primeira da lista)
     const image =
-      typeof x.image === "string" && x.image.trim()
-        ? fixImageUrl(x.image)!
-        : imageUrls[0]; // fallback para primeira da lista
-
-    const price = Number(x.price ?? 0);
-    const stock = Number(x.stock ?? 0);
-    const active = x.active !== false;
+      (typeof x?.image === "string" && x.image.trim()) ||
+      (typeof x?.imageUrl === "string" && x.imageUrl.trim()) ||
+      (typeof x?.imageURL === "string" && x.imageURL.trim()) ||
+      (typeof x?.imagem === "string" && x.imagem.trim()) ||
+      imageUrls[0] ||
+      undefined;
 
     return {
       id,
-      sku: String(x.sku ?? ""),
-      name: String(x.name ?? ""),
-      price,
-      stock,
-      active,
+      sku: String(x?.sku ?? ""),
+      name: String(x?.name ?? x?.nome ?? ""),
+      price: Number(x?.price ?? x?.preco ?? 0),
+      stock: Number(x?.stock ?? x?.estoque ?? 0),
+      active: x?.active !== false && x?.ativo !== false,
       image,
       imageUrls,
     };
@@ -310,6 +322,7 @@ export default function ProdutosPage() {
       ) : (
         <ul className="divide-y rounded-xl border">
           {visibleItems.map((p) => {
+            // aplica fix apenas na hora de renderizar
             const thumb = fixImageUrl(p.image || p.imageUrls?.[0]) || "";
             return (
               <li
