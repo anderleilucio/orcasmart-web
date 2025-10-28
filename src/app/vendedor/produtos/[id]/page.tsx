@@ -71,11 +71,17 @@ export default function EditarProdutoPage() {
       setErro(null);
       try {
         const token = await user.getIdToken();
-        const res = await fetch(`/api/seller-products/${encodeURIComponent(params.id)}`, {
-          method: "GET",
-          headers: { Authorization: `Bearer ${token}`, "Cache-Control": "no-store" },
-          cache: "no-store",
-        });
+        const res = await fetch(
+          `/api/seller-products/${encodeURIComponent(params.id)}`,
+          {
+            method: "GET",
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Cache-Control": "no-store",
+            },
+            cache: "no-store",
+          }
+        );
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
 
@@ -84,16 +90,24 @@ export default function EditarProdutoPage() {
           id: data.id,
           sku: data.sku || "",
           name: data.name || "",
-          price: typeof data.price === "number" ? data.price : Number(data.price ?? 0),
-          stock: typeof data.stock === "number" ? data.stock : Number(data.stock ?? 0),
+          price:
+            typeof data.price === "number" ? data.price : Number(data.price ?? 0),
+          stock:
+            typeof data.stock === "number" ? data.stock : Number(data.stock ?? 0),
           active: data.active !== false,
           imageUrls: Array.isArray(data.imageUrls) ? data.imageUrls : [],
-          imageStoragePaths: Array.isArray(data.imageStoragePaths) ? data.imageStoragePaths : [],
+          imageStoragePaths: Array.isArray(data.imageStoragePaths)
+            ? data.imageStoragePaths
+            : [],
         };
 
         setProd(p);
         setNome(p.name);
-        setPreco(Number(p.price || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2 }));
+        setPreco(
+          Number(p.price || 0).toLocaleString("pt-BR", {
+            minimumFractionDigits: 2,
+          })
+        );
         setEstoque(String(p.stock ?? 0));
         setAtivo(p.active !== false);
         setUrls((p.imageUrls || []).join("\n"));
@@ -126,17 +140,14 @@ export default function EditarProdutoPage() {
       const uploadedPaths: string[] = [];
 
       for (const f of Array.from(files)) {
-        // A função disponível é uploadProductImage. Ela pode retornar:
-        // - string (URL) ou
-        // - objeto { url, path }
+        // A função disponível é uploadProductImage.
+        // Ela pode retornar uma string (URL) ou um objeto { url, path }.
         const result: any = await uploadProductImage(f, u.uid);
+        const url = typeof result === "string" ? result : result?.url;
+        const path = typeof result === "object" ? result?.path : undefined;
 
-        if (typeof result === "string") {
-          uploadedUrls.push(result);
-        } else if (result && typeof result === "object") {
-          if (result.url) uploadedUrls.push(String(result.url));
-          if (result.path) uploadedPaths.push(String(result.path));
-        }
+        if (url) uploadedUrls.push(String(url));
+        if (path) uploadedPaths.push(String(path));
       }
 
       setUrls((prev) => {
@@ -298,8 +309,16 @@ export default function EditarProdutoPage() {
           </div>
 
           <div className="space-y-2">
-            <span className="block text-sm text-slate-600">Adicionar fotos (gera URL e insere abaixo)</span>
-            <input type="file" multiple accept="image/*" onChange={handleFileSelect} className="block" />
+            <span className="block text-sm text-slate-600">
+              Adicionar fotos (gera URL e insere abaixo)
+            </span>
+            <input
+              type="file"
+              multiple
+              accept="image/*"
+              onChange={handleFileSelect}
+              className="block"
+            />
             {previews.length > 0 && (
               <div className="flex flex-wrap gap-2 pt-2">
                 {previews.map((u, i) => (
@@ -325,7 +344,9 @@ export default function EditarProdutoPage() {
 
           <div>
             <label className="block">
-              <span className="block text-sm text-slate-600 mb-1">URLs de imagens (uma por linha)</span>
+              <span className="block text-sm text-slate-600 mb-1">
+                URLs de imagens (uma por linha)
+              </span>
               <textarea
                 value={urls}
                 onChange={(e) => setUrls(e.target.value)}
@@ -337,7 +358,11 @@ export default function EditarProdutoPage() {
           </div>
 
           <label className="inline-flex items-center gap-2">
-            <input type="checkbox" checked={ativo} onChange={(e) => setAtivo(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={ativo}
+              onChange={(e) => setAtivo(e.target.checked)}
+            />
             <span>Produto ativo</span>
           </label>
 
