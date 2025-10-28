@@ -7,6 +7,28 @@ import { useRouter } from "next/navigation";
 import { auth } from "@/lib/firebase";
 import { onAuthStateChanged, User } from "firebase/auth";
 
+/** ---------- Helpers de imagem ---------- */
+// Conserta URLs do Firebase Storage para uso direto em <img>
+function fixImageUrl(u?: string): string | undefined {
+  if (!u) return u;
+
+  // 1) trocar domínio .firebasestorage.app -> API de download googleapis.com
+  u = u.replace(
+    /^https:\/\/([^/]+)\.firebasestorage\.app\/o\//,
+    "https://firebasestorage.googleapis.com/v0/b/$1/o/"
+  );
+
+  // 2) garantir ?alt=media nas URLs da API
+  if (
+    /^https:\/\/firebasestorage\.googleapis\.com\/v0\/b\/[^/]+\/o\//.test(u) &&
+    !/[?&]alt=media\b/.test(u)
+  ) {
+    u += (u.includes("?") ? "&" : "?") + "alt=media";
+  }
+
+  return u;
+}
+
 type Prod = {
   id: string;
   sku: string;
@@ -14,7 +36,7 @@ type Prod = {
   price: number;
   stock: number;
   active?: boolean;
-  image?: string;        // 👈 novo
+  image?: string;
   imageUrls?: string[];
 };
 
@@ -60,7 +82,7 @@ export default function ProdutosPage() {
         ? crypto.randomUUID()
         : `${x.sku}-${Math.random()}`);
 
-    // normaliza imageUrls (aceita string ou array)
+    // normaliza imageUrls (aceita string ou array) e corrige domínio/alt=media
     const rawImgs =
       x.imageUrls ??
       x.images ??
@@ -68,11 +90,19 @@ export default function ProdutosPage() {
       (typeof x.image === "string" ? [x.image] : []);
 
     const imageUrls: string[] = Array.isArray(rawImgs)
-      ? rawImgs.filter((u: any) => typeof u === "string" && u.trim())
+      ? rawImgs
+          .filter((u: any) => typeof u === "string" && u.trim())
+          .map((u: string) => fixImageUrl(u)!)
       : String(rawImgs || "")
           .split(/\n|;|,|\|/g)
           .map((s) => s.trim())
-          .filter(Boolean);
+          .filter(Boolean)
+          .map((u) => fixImageUrl(u)!);
+
+    const image =
+      typeof x.image === "string" && x.image.trim()
+        ? fixImageUrl(x.image)!
+        : imageUrls[0]; // fallback para primeira da lista
 
     const price = Number(x.price ?? 0);
     const stock = Number(x.stock ?? 0);
@@ -85,7 +115,7 @@ export default function ProdutosPage() {
       price,
       stock,
       active,
-      image: typeof x.image === "string" ? x.image : undefined, // 👈 traz image se existir
+      image,
       imageUrls,
     };
   }
@@ -280,7 +310,7 @@ export default function ProdutosPage() {
       ) : (
         <ul className="divide-y rounded-xl border">
           {visibleItems.map((p) => {
-            const thumb = p.image || p.imageUrls?.[0] || "";
+            const thumb = fixImageUrl(p.image || p.imageUrls?.[0]) || "";
             return (
               <li
                 key={p.id}
