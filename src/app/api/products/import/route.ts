@@ -41,6 +41,11 @@ function toInt(v: any, def = 0): number {
   return Number.isFinite(n) ? Math.trunc(n) : def;
 }
 
+/** Normaliza campos de imagem aceitando:
+ *  - imagens/imagens[]/images/images[]/imagem/image/imageUrl (string ou array)
+ *  - separadores: \n ; , |
+ *  Retorna imageUrls único + image = imageUrls[0] (espelho).
+ */
 function parseImages(anyVal: any): { image: string; imageUrls: string[] } {
   const asString = (x: any) => (typeof x === "string" ? x.trim() : "");
   const arr =
@@ -63,6 +68,7 @@ function parseImages(anyVal: any): { image: string; imageUrls: string[] } {
   return { image, imageUrls };
 }
 
+/** Converte um "row" do CSV/JSON para o formato comum do produto */
 function normalizeRow(raw: any) {
   const sku = String(raw.sku ?? raw.SKU ?? raw.Sku ?? "").trim();
   const name = String(raw.name ?? raw.nome ?? raw.Nome ?? "").trim();
@@ -86,7 +92,8 @@ function normalizeRow(raw: any) {
   return { sku, name, price, stock, active, unit, categoryCode, image, imageUrls };
 }
 
-function chunk<T>(arr: T[], size = 450): T[][] {
+/** quebra segura para batches (500 writes máx). Usamos 400 por folga. */
+function chunk<T>(arr: T[], size = 400): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
   return out;
@@ -112,13 +119,10 @@ export async function POST(req: NextRequest) {
 
     // 2) Body
     const body = await req.json().catch(() => ({}));
-    const listRaw: any[] = Array.isArray(body.items)
-      ? body.items
-      : Array.isArray(body.products)
-      ? body.products
-      : Array.isArray(body.rows)
-      ? body.rows
-      : [];
+    const listRaw: any[] =
+      Array.isArray(body.items) ? body.items :
+      Array.isArray(body.products) ? body.products :
+      Array.isArray(body.rows) ? body.rows : [];
 
     if (!listRaw.length) {
       return noStore({ ok: false, error: "Nenhum item para importar." }, 400);
@@ -136,19 +140,25 @@ export async function POST(req: NextRequest) {
     const sellerCol = adminDb.collection("seller_products");
 
     const docIds = normalized.map((p) => `${sellerId}__${p.sku}`);
+
+    // Descobrir quais já existem em /products
     const existingSnaps = await adminDb.getAll(...docIds.map((id) => productsCol.doc(id)));
     const existsMap = new Map<string, boolean>();
     existingSnaps.forEach((snap) => existsMap.set(snap.id, snap.exists));
 
-    let totalCreated = 0, totalUpdated = 0;
+    let totalCreated = 0;
+    let totalUpdated = 0;
+
+    // Map auxiliar para O(1)
+    const byId = new Map<string, typeof normalized[number]>();
+    normalized.forEach((p, i) => byId.set(docIds[i], p));
 
     for (const idsChunk of chunk(docIds, 400)) {
       const batchProducts = adminDb.batch();
       const batchSeller = adminDb.batch();
 
       for (const id of idsChunk) {
-        const idx = docIds.indexOf(id);
-        const p = normalized[idx];
+        const p = byId.get(id)!;
 
         const baseData = {
           sellerId,
@@ -161,13 +171,15 @@ export async function POST(req: NextRequest) {
           stock: Number(p.stock ?? 0),
           active: p.active !== false,
           unit: p.unit,
+          // 👇 imagens normalizadas
           image: p.image,
           imageUrls: p.imageUrls,
           updatedAt: now as any,
         };
 
         const exists = existsMap.get(id);
-        if (exists) totalUpdated++; else totalCreated++;
+        if (exists) totalUpdated++;
+        else totalCreated++;
 
         // products
         const prodRef = productsCol.doc(id);
