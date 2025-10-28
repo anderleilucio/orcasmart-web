@@ -6,7 +6,7 @@ import { useRouter, useParams } from "next/navigation";
 import Link from "next/link";
 import { auth } from "@/lib/firebase";
 import { onAuthStateChanged, User } from "firebase/auth";
-import uploadProductImage, { uploadProductImageWithPath } from "@/lib/uploadImage";
+import { uploadProductImageWithPath } from "@/lib/uploadImage";
 
 type Prod = {
   id: string;
@@ -16,7 +16,7 @@ type Prod = {
   stock: number;
   active?: boolean;
   imageUrls?: string[];
-  imageStoragePaths?: string[]; // <- novo campo que pode vir do backend
+  imageStoragePaths?: string[];
 };
 
 export default function EditarProdutoPage() {
@@ -26,7 +26,6 @@ export default function EditarProdutoPage() {
   const [user, setUser] = useState<User | null>(null);
   const [checking, setChecking] = useState(true);
 
-  // dados
   const [prod, setProd] = useState<Prod | null>(null);
   const [nome, setNome] = useState("");
   const [preco, setPreco] = useState("0,00");
@@ -34,7 +33,6 @@ export default function EditarProdutoPage() {
   const [urls, setUrls] = useState("");
   const [ativo, setAtivo] = useState(true);
 
-  // NOVO: manter também os caminhos no Storage (para deleção futura)
   const [imagePaths, setImagePaths] = useState<string[]>([]);
 
   const [loading, setLoading] = useState(true);
@@ -42,7 +40,7 @@ export default function EditarProdutoPage() {
   const [erro, setErro] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
-  // auth
+  // -------- Auth --------
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
       setUser(u ?? null);
@@ -52,23 +50,36 @@ export default function EditarProdutoPage() {
     return () => unsub();
   }, [router]);
 
-  // carregar produto
+  // -------- Helpers --------
+  function parsePrecoBr(v: string) {
+    const s = String(v ?? "")
+      .trim()
+      .replace(/\s+/g, "")
+      .replace(/\./g, "")
+      .replace(",", ".");
+    const n = Number(s);
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  // -------- Carregar produto --------
   useEffect(() => {
     if (!user || !params?.id) return;
-    let abort = false;
+    let aborted = false;
 
     (async () => {
       setLoading(true);
       setErro(null);
       try {
+        const token = await user.getIdToken();
         const res = await fetch(`/api/seller-products/${encodeURIComponent(params.id)}`, {
           method: "GET",
+          headers: { Authorization: `Bearer ${token}`, "Cache-Control": "no-store" },
           cache: "no-store",
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
 
-        if (abort) return;
+        if (aborted) return;
         const p: Prod = {
           id: data.id,
           sku: data.sku || "",
@@ -79,28 +90,27 @@ export default function EditarProdutoPage() {
           imageUrls: Array.isArray(data.imageUrls) ? data.imageUrls : [],
           imageStoragePaths: Array.isArray(data.imageStoragePaths) ? data.imageStoragePaths : [],
         };
+
         setProd(p);
         setNome(p.name);
-        setPreco(p.price.toLocaleString("pt-BR", { minimumFractionDigits: 2 }));
+        setPreco(Number(p.price || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2 }));
         setEstoque(String(p.stock ?? 0));
         setAtivo(p.active !== false);
         setUrls((p.imageUrls || []).join("\n"));
-
-        // inicializa os paths que vierem do backend
         setImagePaths(p.imageStoragePaths || []);
       } catch (e: any) {
-        if (!abort) setErro(e?.message ?? "Falha ao carregar produto.");
+        if (!aborted) setErro(e?.message ?? "Falha ao carregar produto.");
       } finally {
-        if (!abort) setLoading(false);
+        if (!aborted) setLoading(false);
       }
     })();
 
     return () => {
-      abort = true;
+      aborted = true;
     };
   }, [user, params?.id]);
 
-  // upload de imagens => gera URLs e acrescenta no textarea + acumula paths
+  // -------- Upload de imagens --------
   async function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const files = e.target.files;
     if (!files || files.length === 0) return;
@@ -121,14 +131,12 @@ export default function EditarProdutoPage() {
         uploadedPaths.push(path);
       }
 
-      // adiciona URLs no textarea
       setUrls((prev) => {
         const base = (prev || "").trim();
         const block = uploadedUrls.join("\n");
         return base ? `${base}\n${block}` : block;
       });
 
-      // acumula paths no estado
       setImagePaths((prev) => [...prev, ...uploadedPaths]);
 
       setToast(`${uploadedUrls.length} imagem(ns) enviada(s).`);
@@ -136,26 +144,22 @@ export default function EditarProdutoPage() {
     } catch (err: any) {
       alert(err?.message ?? "Falha ao enviar imagem");
     } finally {
-      // permite selecionar o mesmo arquivo de novo, se quiser
-      e.target.value = "";
+      e.target.value = ""; // permite re-selecionar o mesmo arquivo
     }
   }
 
-  function parsePrecoBr(v: string) {
-    const s = (v || "").trim().replace(/\./g, "").replace(",", ".");
-    const n = parseFloat(s);
-    return Number.isFinite(n) ? n : 0;
-  }
-
+  // -------- Salvar --------
   async function onSave() {
     if (!user || !prod) return;
     setSaving(true);
     setErro(null);
     try {
-      const body: any = {
+      const token = await user.getIdToken();
+
+      const body: Record<string, any> = {
         sellerId: user.uid,
         sku: prod.sku,
-        name: nome.trim(),
+        name: (nome || "").trim(),
         price: parsePrecoBr(preco),
         stock: parseInt(estoque || "0", 10),
         imageUrls: (urls || "")
@@ -163,21 +167,18 @@ export default function EditarProdutoPage() {
           .map((u) => u.trim())
           .filter(Boolean),
         active: ativo,
-        // mantém categoryCode existente se tiver
-        categoryCode: undefined,
+        // categoryCode: manter se o backend fizer merge sem isto; envie se precisar atualizar.
       };
 
-      // Envie também os paths (se houver). Se quiser que NÃO sobrescreva quando vazio,
-      // basta enviar SÓ quando tiver algo:
-      if (imagePaths.length > 0) {
-        body.imageStoragePaths = imagePaths;
-      }
-      // Se você quiser poder LIMPAR no servidor, envie sempre:
-      // body.imageStoragePaths = imagePaths;
+      // Envie os paths quando houver (permite o backend persistir/limpar corretamente)
+      body.imageStoragePaths = imagePaths;
 
       const res = await fetch("/api/seller-products/upsert", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
         body: JSON.stringify(body),
       });
       const data = await res.json().catch(() => ({}));
@@ -192,14 +193,16 @@ export default function EditarProdutoPage() {
     }
   }
 
+  // -------- Excluir --------
   async function onDelete() {
-    if (!prod) return;
+    if (!prod || !user) return;
     const ok = window.confirm("Tem certeza que deseja excluir este produto?");
     if (!ok) return;
     try {
+      const token = await user.getIdToken();
       const res = await fetch(`/api/seller-products/${encodeURIComponent(prod.id)}`, {
         method: "DELETE",
-        headers: { "Cache-Control": "no-store" },
+        headers: { Authorization: `Bearer ${token}`, "Cache-Control": "no-store" },
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.error || `Falha (HTTP ${res.status})`);
@@ -305,7 +308,6 @@ export default function EditarProdutoPage() {
               </div>
             )}
 
-            {/* (Opcional) Mostra quantos paths já temos guardados */}
             {imagePaths.length > 0 && (
               <div className="text-xs text-slate-500">
                 {imagePaths.length} caminho(s) de Storage preparado(s) para salvar.

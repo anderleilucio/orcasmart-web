@@ -1,92 +1,123 @@
-// src/app/api/seller-products/list/route.ts
 import "server-only";
 import { NextRequest, NextResponse } from "next/server";
-import { adminDb } from "@/lib/firebaseAdmin";
+import { adminAuth, adminDb } from "@/lib/firebaseAdmin";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-function noStoreJson(body: any, init?: number | ResponseInit) {
-  const base: ResponseInit =
-    typeof init === "number" ? { status: init } : (init || {});
+function noStore(body: any, status = 200) {
   return NextResponse.json(body, {
-    ...base,
-    headers: {
-      "Cache-Control": "no-store, max-age=0",
-      ...(base.headers || {}),
-    },
+    status,
+    headers: { "Cache-Control": "no-store, max-age=0" },
   });
 }
 
-/**
- * GET /api/seller-products/list?sellerId=<UID>&category=<CODE>&active=true|false
- * Retorna os produtos do vendedor (ativos ou inativos).
- *
- * Exemplos:
- *   /api/seller-products/list?sellerId=abc123
- *   /api/seller-products/list?sellerId=abc123&category=EST
- *   /api/seller-products/list?sellerId=abc123&active=true
- */
+function toNum(v: any, d = 0): number {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (v == null) return d;
+  const s = String(v).trim().replace(/\./g, "").replace(",", ".");
+  const n = Number(s);
+  return Number.isFinite(n) ? n : d;
+}
+
+function normItem(docId: string, raw: any) {
+  const imageUrls: string[] = Array.isArray(raw.imageUrls)
+    ? raw.imageUrls.filter((u: any) => typeof u === "string" && u)
+    : Array.isArray(raw.images)
+    ? raw.images.filter((u: any) => typeof u === "string" && u)
+    : typeof raw.image === "string" && raw.image
+    ? [raw.image]
+    : [];
+
+  const active =
+    typeof raw.active === "boolean"
+      ? raw.active
+      : typeof raw.ativo === "boolean"
+      ? raw.ativo
+      : true;
+
+  const categoryCode = (raw.categoryCode ?? raw.category ?? null) || null;
+
+  return {
+    id: docId,
+    sku: String(raw.sku ?? ""),
+    name: String(raw.name ?? raw.nome ?? ""),
+    price: toNum(raw.price ?? raw.preco, 0),
+    stock: toNum(raw.stock ?? raw.estoque, 0),
+    active,
+    imageUrls,
+    categoryCode,
+    ownerId: raw.ownerId ?? raw.sellerId ?? raw.vendorUid ?? null,
+    sellerId: raw.sellerId ?? raw.ownerId ?? raw.vendorUid ?? null,
+    vendorUid: raw.vendorUid ?? null,
+  };
+}
+
+async function queryByOwner(col: string, sellerId: string, field: "ownerId" | "vendorUid" | "sellerId") {
+  const snap = await adminDb.collection(col).where(field, "==", sellerId).get();
+  return snap.docs.map((d) => ({ id: d.id, ...d.data(), _src: col }));
+}
+
 export async function GET(req: NextRequest) {
   try {
-    const { searchParams } = new URL(req.url);
-    const sellerId = searchParams.get("sellerId");
-    const category = searchParams.get("category");
-    const activeParam = searchParams.get("active"); // "true" | "false" | null
-
-    if (!sellerId) {
-      return noStoreJson({ error: "Parâmetro 'sellerId' é obrigatório." }, 400);
+    // --- UID do token (preferido) ou sellerId= na URL ---
+    const authHeader = req.headers.get("authorization") || "";
+    let uidFromToken: string | null = null;
+    const m = authHeader.match(/^Bearer\s+(.+)$/i);
+    if (m) {
+      try {
+        const decoded = await adminAuth.verifyIdToken(m[1]);
+        uidFromToken = decoded.uid;
+      } catch {/* ignore */}
     }
 
-    let q: FirebaseFirestore.Query = adminDb
-      .collection("seller_products")
-      .where("sellerId", "==", sellerId);
+    const url = new URL(req.url);
+    const sellerIdParam = (url.searchParams.get("sellerId") || "").trim();
+    const sellerId = uidFromToken || sellerIdParam;
+    if (!sellerId) return noStore({ ok: false, error: "missing sellerId" }, 400);
 
-    if (category) {
-      q = q.where("categoryCode", "==", category.toUpperCase());
+    // filtros opcionais
+    const activeParam = url.searchParams.get("active");
+    const categoryParam = (url.searchParams.get("category") || url.searchParams.get("categoryCode") || "").trim() || null;
+
+    const results = await Promise.all([
+      // products (preferido)
+      queryByOwner("products", sellerId, "ownerId"),
+      queryByOwner("products", sellerId, "vendorUid"),
+      queryByOwner("products", sellerId, "sellerId"),
+      // seller_products (legado)
+      queryByOwner("seller_products", sellerId, "ownerId"),
+      queryByOwner("seller_products", sellerId, "vendorUid"),
+      queryByOwner("seller_products", sellerId, "sellerId"),
+    ]);
+
+    // mesclar e deduplicar
+    const mergedByDoc = new Map<string, any>();
+    for (const bucket of results) {
+      for (const item of bucket) {
+        if (!mergedByDoc.has(item.id)) mergedByDoc.set(item.id, item);
+      }
     }
 
-    if (activeParam === "true") {
-      q = q.where("active", "==", true);
-    } else if (activeParam === "false") {
-      q = q.where("active", "==", false);
+    // normalizar
+    let items = Array.from(mergedByDoc.entries()).map(([id, raw]) => normItem(id, raw));
+
+    // filtros na memória (compat)
+    if (activeParam === "true") items = items.filter((x) => x.active === true);
+    else if (activeParam === "false") items = items.filter((x) => x.active === false);
+
+    if (categoryParam) {
+      items = items.filter(
+        (x) => (x.categoryCode || "").toLowerCase() === categoryParam.toLowerCase()
+      );
     }
 
-    // Evitamos orderBy para não exigir índice composto desnecessário.
-    const snap = await q.get();
+    // ordenar por nome para estabilizar
+    items.sort((a, b) => (a.name || "").localeCompare(b.name || "", "pt-BR"));
 
-    const items = snap.docs.map((doc) => {
-      const d = doc.data() as any;
-      return {
-        id: doc.id,
-        sellerId: d.sellerId ?? sellerId,
-        sku: d.sku ?? "",
-        name: d.name ?? "",
-        categoryCode: d.categoryCode ?? null,
-        price: typeof d.price === "number" ? d.price : Number(d.price ?? 0),
-        stock: typeof d.stock === "number" ? d.stock : Number(d.stock ?? 0),
-        active: d.active !== false,
-        imageUrls: Array.isArray(d.imageUrls) ? d.imageUrls : [],
-        createdAt: d.createdAt ?? null,
-        updatedAt: d.updatedAt ?? null,
-      };
-    });
-
-    return noStoreJson({ items }, 200);
-  } catch (err: any) {
-    console.error("[GET /api/seller-products/list]", err);
-    return noStoreJson({ error: err?.message ?? "Erro interno" }, 500);
+    return noStore({ ok: true, count: items.length, items });
+  } catch (e: any) {
+    return noStore({ ok: false, error: e?.message ?? "internal error" }, 500);
   }
-}
-
-export async function OPTIONS() {
-  return new NextResponse(null, {
-    status: 204,
-    headers: {
-      "Access-Control-Allow-Methods": "GET, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
-      "Cache-Control": "no-store, max-age=0",
-    },
-  });
 }

@@ -287,43 +287,68 @@ export default function NovoProdutoPage() {
         return;
       }
 
-      const resCat = await fetch("/api/products/add", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: nome.trim(),
-          subcategory: undefined,
-          unit: "un",
-          active: true,
-        }),
-      });
-      const cat = await resCat.json().catch(() => ({}));
-      if (!resCat.ok) throw new Error(cat?.error || `Falha no catálogo`);
+      const token = await user.getIdToken();
 
-      const skuRoot: string | undefined = cat?.sku_root;
-      const normName: string = cat?.name || nome.trim();
-      const categoryCode: string | undefined = cat?.categoryCode;
-      if (!skuRoot) throw new Error("Não foi possível gerar/obter o SKU.");
+      // validações mínimas
+      const skuFinal = normalizeSku(sku);
+      const nameFinal = (nome || "").trim();
+      if (!skuFinal) throw new Error("Informe um SKU.");
+      if (!nameFinal) throw new Error("Informe o nome do produto.");
 
-      const resSeller = await fetch("/api/seller-products/upsert", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sellerId: user.uid,
-          sku: skuRoot,
-          name: normName,
-          categoryCode,
-          price: parsePrecoBr(preco),
-          stock: parseInt(estoque || "0", 10),
-          imageUrls: (urls || "")
-            .split("\n")
-            .map((u) => u.trim())
-            .filter(Boolean),
-          active: ativo,
-        }),
-      });
-      const seller = await resSeller.json().catch(() => ({}));
-      if (!resSeller.ok) throw new Error(seller?.error || `Falha no vendedor`);
+      const priceNumber = parsePrecoBr(preco);
+      const stockNumber = Number.parseInt(estoque || "0", 10) || 0;
+
+      const imageUrls = (urls || "")
+        .split("\n")
+        .map((u) => u.trim())
+        .filter(Boolean);
+
+      // 1) Upsert no catálogo (products)
+      {
+        const res = await fetch("/api/products", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            sku: skuFinal,
+            name: nameFinal,
+            unit: "un",
+            active: true,
+            price: priceNumber,
+            stock: stockNumber,
+            images: imageUrls,
+            // opcionalmente pode mandar categoryCode, se tiver slug escolhido
+            categoryCode: categorySlug || undefined,
+          }),
+        });
+        const j = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(j?.error || `Falha ao salvar no catálogo (HTTP ${res.status})`);
+      }
+
+      // 2) Upsert no índice do vendedor (para a tela listar)
+      {
+        const res2 = await fetch("/api/seller-products/upsert", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            sellerId: user.uid,
+            sku: skuFinal,
+            name: nameFinal,
+            categoryCode: categorySlug || undefined,
+            price: priceNumber,
+            stock: stockNumber,
+            imageUrls,
+            active: ativo,
+          }),
+        });
+        const j2 = await res2.json().catch(() => ({}));
+        if (!res2.ok) throw new Error(j2?.error || `Falha ao salvar no catálogo do vendedor (HTTP ${res2.status})`);
+      }
 
       localStorage.setItem("orcasmart_toast", "Produto criado com sucesso!");
       router.push("/vendedor/produtos");
@@ -387,7 +412,7 @@ export default function NovoProdutoPage() {
                 }
                 setSku(val);
               }}
-              placeholder="EX: CIM-CP32"
+              placeholder="EX: CIM-0001"
               className="w-full rounded-md border px-3 py-2"
             />
           </label>

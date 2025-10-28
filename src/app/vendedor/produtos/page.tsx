@@ -2,7 +2,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { auth } from "@/lib/firebase";
 import { onAuthStateChanged, User } from "firebase/auth";
@@ -41,290 +41,202 @@ export default function ProdutosPage() {
     return () => unsub();
   }, [router]);
 
-  // ---------------- Dados base + paginação (sem paginação server por enquanto) ----------------
+  // ---------------- Dados ----------------
   const [items, setItems] = useState<Prod[]>([]);
   const [erro, setErro] = useState<string | null>(null);
-
-  const [hasMore, setHasMore] = useState<boolean>(false);
-  const [loadingFirst, setLoadingFirst] = useState<boolean>(true);
-  const [loadingMore, setLoadingMore] = useState<boolean>(false);
-  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
-
-  // evita condições de corrida ao recarregar
-  const lastReqSeq = useRef(0);
-
-  // evita duplo clique no excluir e mostra "Excluindo…"
-  const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
-
-  // Toast de feedback
+  const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<string | null>(null);
 
-  // Lê toast salvo por outras telas (ex.: "Criado com sucesso!")
+  // ---------------- Toast ----------------
   useEffect(() => {
-    const t = localStorage.getItem("orcasmart_toast");
+    const t =
+      typeof window !== "undefined"
+        ? localStorage.getItem("orcasmart_toast")
+        : null;
     if (t) {
       setToast(t);
       localStorage.removeItem("orcasmart_toast");
     }
   }, []);
 
-  // Some automaticamente em 2s sempre que houver toast
   useEffect(() => {
     if (!toast) return;
-    const tm = setTimeout(() => setToast(null), 2000);
+    const tm = setTimeout(() => setToast(null), 2200);
     return () => clearTimeout(tm);
   }, [toast]);
 
-  // ---------------- Filtros/ordenação client-side ----------------
+  // ---------------- Filtros ----------------
   const [query, setQuery] = useState("");
+  // ✅ padrão: mostrar TODOS
   const [statusFilter, setStatusFilter] =
-    useState<"all" | "active" | "inactive">("active"); // padrão: só ativos
+    useState<"all" | "active" | "inactive">("all");
   const [sortKey, setSortKey] = useState<SortKey>("name-asc");
 
-  const mergePage = useCallback((prev: Prod[], next: Prod[]) => {
-    const seen = new Set(prev.map((p) => p.id));
-    const merged = [...prev];
-    for (const n of next) {
-      if (!seen.has(n.id)) merged.push(n);
-    }
-    return merged;
-  }, []);
+  // ---------------- Normalizador ----------------
+  function normalizeApiItem(x: any): Prod {
+    const id: string =
+      x.id ||
+      x.docId ||
+      x._id ||
+      x.refId ||
+      x.sku ||
+      (typeof crypto !== "undefined"
+        ? crypto.randomUUID()
+        : `${x.sku}-${Math.random()}`);
 
-  // ---------------- Carregar lista ----------------
-  const loadFirstPage = useCallback(async () => {
-    if (!user) return;
+    const imageUrls: string[] = Array.isArray(x.imageUrls)
+      ? x.imageUrls.filter((u: any) => typeof u === "string" && u)
+      : Array.isArray(x.images)
+      ? x.images.filter((u: any) => typeof u === "string" && u)
+      : typeof x.image === "string" && x.image
+      ? [x.image]
+      : typeof x.imageUrl === "string" && x.imageUrl
+      ? [x.imageUrl]
+      : [];
 
-    const mySeq = ++lastReqSeq.current;
+    const price =
+      typeof x.price === "number"
+        ? x.price
+        : Number.isFinite(Number(x.price))
+        ? Number(x.price)
+        : 0;
 
-    setErro(null);
-    setLoadMoreError(null);
-    setLoadingFirst(true);
-    setLoadingMore(false);
-    setHasMore(false);
-    setItems([]);
+    const stock =
+      typeof x.stock === "number"
+        ? x.stock
+        : Number.isFinite(Number(x.stock))
+        ? Number(x.stock)
+        : 0;
 
-    const ac = new AbortController();
+    const active =
+      typeof x.active === "boolean"
+        ? x.active
+        : typeof x.ativo === "boolean"
+        ? x.ativo
+        : true;
 
-    try {
-      const token = await user.getIdToken();
-      const url = new URL("/api/seller-products/list", window.location.origin);
-      url.searchParams.set("sellerId", user.uid);
-
-      const res = await fetch(url.toString(), {
-        method: "GET",
-        headers: { Authorization: `Bearer ${token}` },
-        cache: "no-store",
-        signal: ac.signal,
-      });
-
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(body?.error ?? `HTTP ${res.status}`);
-
-      const page: Prod[] = Array.isArray(body.items)
-        ? body.items.map((x: any) => ({
-            id: x.id,
-            sku: x.sku || "",
-            name: x.name || "",
-            price: typeof x.price === "number" ? x.price : Number(x.price ?? 0),
-            stock: typeof x.stock === "number" ? x.stock : Number(x.stock ?? 0),
-            active: x.active !== false,
-            imageUrls: Array.isArray(x.imageUrls) ? x.imageUrls : [],
-          }))
-        : [];
-
-      if (lastReqSeq.current !== mySeq) return; // resposta antiga: ignora
-      setItems(page);
-      setHasMore(false); // a rota atual não pagina
-    } catch (e: any) {
-      if (e?.name === "AbortError") return;
-      if (lastReqSeq.current !== mySeq) return; // resposta antiga: ignora
-      setErro(e?.message ?? "Falha ao carregar produtos");
-      setItems([]);
-      setHasMore(false);
-    } finally {
-      if (lastReqSeq.current === mySeq) setLoadingFirst(false);
-    }
-
-    return () => ac.abort();
-  }, [user]);
-
-  // recarrega quando logar OU quando a aba ganhar foco
-  useEffect(() => {
-    if (user) {
-      const cleanup = loadFirstPage();
-      return () => {
-        // @ts-expect-error cleanup possivelmente Promise<void | (()=>void)>
-        if (typeof cleanup === "function") cleanup();
-      };
-    }
-  }, [user, loadFirstPage]);
-
-  useEffect(() => {
-    const onFocus = () => {
-      if (user) loadFirstPage();
+    return {
+      id,
+      sku: String(x.sku ?? ""),
+      name: String(x.name ?? x.nome ?? ""),
+      price,
+      stock,
+      active,
+      imageUrls,
     };
-    window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
-  }, [user, loadFirstPage]);
+  }
 
-  // próxima página (placeholder – sem paginação servidor)
-  const loadNextPage = useCallback(async () => {
-    if (!user || loadingMore) return;
-    setLoadMoreError(null);
-    setLoadingMore(true);
-
-    const ac = new AbortController();
-
+  // ---------------- Exportar CSV (força download) ----------------
+  async function exportCsv() {
     try {
-      const token = await user.getIdToken();
-      const url = new URL("/api/seller-products/list", window.location.origin);
-      url.searchParams.set("sellerId", user.uid);
+      const uid = auth.currentUser?.uid;
+      if (!uid) return alert("Faça login para exportar.");
 
-      const res = await fetch(url.toString(), {
+      const token = await auth.currentUser?.getIdToken().catch(() => undefined);
+      const url = `/api/catalog/export?format=csv&section=all&sellerId=${encodeURIComponent(
+        uid
+      )}&_=${Date.now()}`;
+
+      const res = await fetch(url, {
         method: "GET",
-        headers: { Authorization: `Bearer ${token}` },
         cache: "no-store",
-        signal: ac.signal,
-      });
-
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(body?.error ?? `HTTP ${res.status}`);
-
-      const page: Prod[] = Array.isArray(body.items)
-        ? body.items.map((x: any) => ({
-            id: x.id,
-            sku: x.sku || "",
-            name: x.name || "",
-            price: typeof x.price === "number" ? x.price : Number(x.price ?? 0),
-            stock: typeof x.stock === "number" ? x.stock : Number(x.stock ?? 0),
-            active: x.active !== false,
-            imageUrls: Array.isArray(x.imageUrls) ? x.imageUrls : [],
-          }))
-        : [];
-
-      setItems((prev) => mergePage(prev, page));
-      setHasMore(false);
-    } catch (e: any) {
-      if (e?.name === "AbortError") return;
-      setLoadMoreError(e?.message ?? "Falha ao carregar mais");
-    } finally {
-      setLoadingMore(false);
-    }
-
-    return () => ac.abort();
-  }, [user, loadingMore, mergePage]);
-
-  // ---------------- Exclusão (DELETE no backend de seller) ----------------
-  async function handleDelete(id: string) {
-    if (!user) return;
-
-    if (deletingIds.has(id)) return; // evita duplo clique
-    const ok = window.confirm("Tem certeza que deseja excluir este produto?");
-    if (!ok) return;
-
-    // marca “deletando” e remove otimista
-    setDeletingIds((s) => new Set(s).add(id));
-    const prev = items;
-    setItems((cur) => cur.filter((p) => p.id !== id));
-
-    try {
-      const token = await user.getIdToken().catch(() => undefined);
-      const res = await fetch(`/api/seller-products/${encodeURIComponent(id)}`, {
-        method: "DELETE",
         headers: {
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
           "Cache-Control": "no-store",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          Accept: "text/csv,*/*",
         },
       });
 
       if (!res.ok) {
-        setItems(prev); // rollback
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body?.error ?? `Falha (HTTP ${res.status}) ao excluir.`);
+        let msg = `Falha ao exportar (HTTP ${res.status})`;
+        try {
+          const j = await res.json();
+          msg = j?.error || msg;
+        } catch {}
+        throw new Error(msg);
       }
 
-      // recarrega do servidor para estado “verdade”
-      await loadFirstPage();
-      setToast("Produto removido.");
-    } catch (err: any) {
-      setItems(prev);
-      alert(err?.message ?? "Falha ao excluir.");
-    } finally {
-      setDeletingIds((s) => {
-        const n = new Set(s);
-        n.delete(id);
-        return n;
-      });
-    }
-  }
-
-  // ---------------- Exportar CSV (compatível com Safari/Chrome/Edge) ----------------
-  async function handleExportCsv() {
-    if (!user) return;
-    try {
-      const qs = new URLSearchParams({ sellerId: user.uid });
-      const res = await fetch(`/api/catalog/export?${qs.toString()}`, { method: "GET" });
-
-      if (!res.ok) {
-        const j = await res.json().catch(() => ({}));
-        throw new Error(j?.error || `HTTP ${res.status}`);
-      }
-
-      const ct = (res.headers.get("content-type") || "").toLowerCase();
-
-      // 1) CSV retornado direto pelo endpoint
-      if (ct.includes("text/csv") || ct.includes("application/octet-stream")) {
-        const blob = await res.blob();
-        const filename =
-          res.headers.get("x-filename") ||
-          res.headers.get("content-disposition")?.match(/filename="?([^"]+)"?/)?.[1] ||
-          "catalogo.csv";
-
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
-        return;
-      }
-
-      // 2) JSON { url } ou { dataUrl, filename }
-      const json = await res.json().catch(() => ({}));
-      const url: string | undefined = json?.url || json?.dataUrl;
-      const filename: string = json?.filename || "catalogo.csv";
-      if (!url) throw new Error("Resposta inválida da exportação.");
-
-      if (url.startsWith("data:")) {
-        // Safari bloqueia window.open(data:...), então força download via <a download>
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        return;
-      }
-
-      // 3) URL http/https normal (ex.: link assinado do Storage)
-      window.open(url, "_blank", "noopener,noreferrer");
+      const blob = await res.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "catalogo_orcasmart.csv";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(a.href);
     } catch (e: any) {
-      alert(e?.message || "Falha ao exportar CSV");
+      setErro(e?.message || "Falha ao exportar CSV");
     }
   }
 
-  // ---------------- Busca + filtro + ordenação ----------------
-  const visibleItems = useMemo(() => {
-    const q = (query ?? "").trim().toLowerCase();
+  // ---------------- Busca produtos (via /api/products) ----------------
+  async function fetchProducts(uid: string) {
+    const token = await auth.currentUser?.getIdToken();
 
+    const url = `/api/products?ownerId=${encodeURIComponent(
+      uid
+    )}&limit=200&order=updatedAt&_=${Date.now()}`;
+
+    const res = await fetch(url, {
+      method: "GET",
+      cache: "no-store",
+      headers: {
+        "Cache-Control": "no-store",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      next: { revalidate: 0 },
+    });
+
+    let body: any = {};
+    try {
+      body = await res.json();
+    } catch {
+      throw new Error(`HTTP ${res.status}`);
+    }
+
+    if (!res.ok || body?.ok === false) {
+      throw new Error(body?.error ?? `HTTP ${res.status}`);
+    }
+
+    const listRaw: any[] = Array.isArray(body.items) ? body.items : [];
+    return listRaw.map(normalizeApiItem);
+  }
+
+  // ---------------- Carrega ----------------
+  const loadProducts = useCallback(async () => {
+    if (!user) return;
+    setErro(null);
+    setLoading(true);
+    try {
+      const data = await fetchProducts(user.uid);
+      setItems(data);
+    } catch (e: any) {
+      setErro(e?.message || "Falha ao carregar produtos");
+      setItems([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [user]);
+
+  useEffect(() => {
+    if (user?.uid) loadProducts();
+  }, [user?.uid, loadProducts]);
+
+  useEffect(() => {
+    const unsub = auth.onIdTokenChanged((u) => {
+      if (u) loadProducts();
+    });
+    return () => unsub();
+  }, [loadProducts]);
+
+  // ---------------- Filtro/ordenação ----------------
+  const visibleItems = useMemo(() => {
+    const q = query.trim().toLowerCase();
     const filtered = (items ?? []).filter((p) => {
       const passQuery =
         !q ||
-        p.name?.toLowerCase().includes(q) ||
-        p.sku?.toLowerCase().includes(q);
-
+        p.name.toLowerCase().includes(q) ||
+        p.sku.toLowerCase().includes(q);
       const isActive = p.active !== false;
       const passStatus =
         statusFilter === "all"
@@ -332,7 +244,6 @@ export default function ProdutosPage() {
           : statusFilter === "active"
           ? isActive
           : !isActive;
-
       return passQuery && passStatus;
     });
 
@@ -354,31 +265,8 @@ export default function ProdutosPage() {
           return 0;
       }
     });
-
     return sorted;
   }, [items, query, statusFilter, sortKey]);
-
-  // ---------------- Scroll infinito (placeholder) ----------------
-  const sentinelRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!hasMore) return;
-    const el = sentinelRef.current;
-    if (!el) return;
-
-    const io = new IntersectionObserver(
-      (entries) => {
-        const e = entries[0];
-        if (e.isIntersecting) {
-          loadNextPage();
-        }
-      },
-      { rootMargin: "1200px 0px 1200px 0px" }
-    );
-
-    io.observe(el);
-    return () => io.disconnect();
-  }, [hasMore, loadNextPage]);
 
   // ---------------- UI ----------------
   if (checking) return <main className="p-6">Carregando…</main>;
@@ -392,7 +280,6 @@ export default function ProdutosPage() {
         </div>
       )}
 
-      {/* Cabeçalho */}
       <div className="flex items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold">Produtos</h1>
@@ -400,10 +287,11 @@ export default function ProdutosPage() {
         </div>
 
         <div className="flex items-center gap-2">
+          {/* ✅ Exportar CSV (com download e Bearer) */}
           <button
-            onClick={handleExportCsv}
+            onClick={exportCsv}
             className="rounded-lg border px-4 py-2.5 text-sm"
-            title="Exportar CSV para download"
+            title="Exportar CSV"
           >
             Exportar CSV
           </button>
@@ -411,7 +299,6 @@ export default function ProdutosPage() {
           <Link
             href="/vendedor/produtos/importar"
             className="rounded-lg border px-4 py-2.5 text-sm"
-            title="Importar via planilha CSV"
           >
             Importar CSV
           </Link>
@@ -422,10 +309,17 @@ export default function ProdutosPage() {
           >
             + Novo produto
           </Link>
+
+          <button
+            onClick={loadProducts}
+            className="rounded-lg border px-3 py-2 text-sm"
+            title="Recarregar"
+          >
+            Recarregar
+          </button>
         </div>
       </div>
 
-      {/* Busca + filtros */}
       <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto_auto] gap-3">
         <input
           value={query}
@@ -460,15 +354,13 @@ export default function ProdutosPage() {
         </select>
       </div>
 
-      {/* Erro geral */}
       {erro && (
-        <div className="rounded-lg border border-red-400/40 bg-red-500/10 px-4 py-3 text-sm text-red-500">
+        <div className="rounded-lg border border-red-400/40 bg-red-500/10 px-4 py-3 text-sm text-red-600">
           {erro}
         </div>
       )}
 
-      {/* Lista */}
-      {loadingFirst ? (
+      {loading ? (
         <div className="rounded-xl border px-4 py-6">Carregando lista…</div>
       ) : visibleItems.length === 0 ? (
         <div className="rounded-xl border px-5 py-10 text-center">
@@ -477,8 +369,9 @@ export default function ProdutosPage() {
             <button
               onClick={() => {
                 setQuery("");
-                setStatusFilter("active");
+                setStatusFilter("all"); // volta para “Todos”
                 setSortKey("name-asc");
+                loadProducts();
               }}
               className="rounded-lg border px-4 py-2 text-sm"
             >
@@ -493,82 +386,48 @@ export default function ProdutosPage() {
           </div>
         </div>
       ) : (
-        <>
-          <ul className="divide-y rounded-xl border">
-            {visibleItems.map((p) => (
-              <li
-                key={p.id}
-                className="flex items-center justify-between gap-3 px-4 py-4"
-              >
-                <div className="flex items-center gap-3">
-                  {p.imageUrls?.length ? (
-                    <img
-                      src={p.imageUrls[0]}
-                      alt=""
-                      className="h-14 w-14 rounded-lg border object-cover"
-                      loading="lazy"
-                      onError={(e) => {
-                        (e.currentTarget as HTMLImageElement).src =
-                          "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='56' height='56'/>";
-                      }}
-                    />
-                  ) : (
-                    <div className="h-14 w-14 rounded-lg border bg-slate-50" />
-                  )}
-
-                  <div>
-                    <div className="font-medium">
-                      {p.name} <span className="opacity-60">— {p.sku}</span>
-                    </div>
-                    <div className="text-sm opacity-70">
-                      Preço: R$
-                      {Number(p.price).toLocaleString("pt-BR", {
-                        minimumFractionDigits: 2,
-                      })}{" "}
-                      • Estoque: {p.stock ?? 0} •{" "}
-                      {p.active !== false ? "ativo" : "inativo"}
-                    </div>
+        <ul className="divide-y rounded-xl border">
+          {visibleItems.map((p) => (
+            <li
+              key={p.id}
+              className="flex items-center justify-between gap-3 px-4 py-4"
+            >
+              <div className="flex items-center gap-3">
+                {p.imageUrls?.length ? (
+                  <img
+                    src={p.imageUrls[0]}
+                    alt=""
+                    className="h-14 w-14 rounded-lg border object-cover"
+                  />
+                ) : (
+                  <div className="h-14 w-14 rounded-lg border bg-slate-50" />
+                )}
+                <div>
+                  <div className="font-medium">
+                    {p.name} <span className="opacity-60">— {p.sku}</span>
+                  </div>
+                  <div className="text-sm opacity-70">
+                    R{"$ "}
+                    {Number(p.price).toLocaleString("pt-BR", {
+                      minimumFractionDigits: 2,
+                    })}{" "}
+                    • Estoque: {p.stock ?? 0} •{" "}
+                    {p.active !== false ? "ativo" : "inativo"}
                   </div>
                 </div>
-
-                <div className="flex items-center gap-2">
-                  <Link
-                    href={`/vendedor/produtos/${p.id}`}
-                    className="rounded-lg border px-3 py-1.5 text-sm"
-                  >
-                    Editar
-                  </Link>
-                  <button
-                    onClick={() => handleDelete(p.id)}
-                    disabled={deletingIds.has(p.id)}
-                    aria-busy={deletingIds.has(p.id)}
-                    className="rounded-lg border border-red-300 text-red-600 px-3 py-1.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {deletingIds.has(p.id) ? "Excluindo…" : "Excluir"}
-                  </button>
-                </div>
-              </li>
-            ))}
-          </ul>
-
-          <div className="mt-4 flex flex-col items-center justify-center gap-3">
-            {loadingMore && (
-              <div className="text-sm opacity-70">Carregando mais…</div>
-            )}
-            {loadMoreError && (
-              <div className="flex items-center gap-2">
-                <span className="text-sm text-red-500">{loadMoreError}</span>
-                <button
-                  onClick={loadNextPage}
-                  className="rounded border px-2 py-1 text-sm"
-                >
-                  Tentar novamente
-                </button>
               </div>
-            )}
-            {hasMore && <div ref={sentinelRef} className="h-1 w-1" />}
-          </div>
-        </>
+
+              <div className="flex gap-2">
+                <Link
+                  href={`/vendedor/produtos/${encodeURIComponent(p.id)}`}
+                  className="rounded-lg border px-3 py-2 text-sm"
+                >
+                  Editar
+                </Link>
+              </div>
+            </li>
+          ))}
+        </ul>
       )}
     </main>
   );

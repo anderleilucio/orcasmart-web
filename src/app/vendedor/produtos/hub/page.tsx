@@ -11,7 +11,6 @@ export default function ProdutosHubPage() {
       title: "Gerar CSV (Fotos & URLs)",
       desc:
         "Selecione fotos e/ou cole URLs. Sugerimos categoria e prefixo do SKU automaticamente (ex.: ELE-, INS-).",
-      // ✅ apontando para a sua página que já existe
       href: "/vendedor/imagens",
       icon: (
         <svg
@@ -29,7 +28,9 @@ export default function ProdutosHubPage() {
     },
     {
       title: "Importar CSV para cadastrar",
-      desc: "Carregue um arquivo CSV e cadastre/atualize produtos em lote.",
+      desc:
+        "Envie um arquivo CSV (SKU, Nome, Preço, Estoque, etc.) e cadastre seus produtos automaticamente no catálogo.",
+      // ✅ corrigido: caminho exato da página de importação
       href: "/vendedor/produtos/importar",
       icon: (
         <svg
@@ -105,7 +106,6 @@ export default function ProdutosHubPage() {
       title: "Regras de categorização (HUB)",
       desc:
         "Cadastre aliases por categoria (ex.: “cabo 3mm” em Elétrica). Suas sugestões terão prioridade.",
-      // ✅ esta página criamos agora há pouco
       href: "/vendedor/hub/categorizacao",
       icon: (
         <svg
@@ -161,9 +161,11 @@ export default function ProdutosHubPage() {
       </div>
 
       <div className="text-xs text-gray-500">
-        Dica: depois de testar, você pode apontar o menu lateral “Produtos” para{" "}
-        <code className="px-1 py-0.5 bg-gray-100 rounded">/vendedor/produtos/hub</code> sem
-        alterar suas páginas atuais.
+        Dica: você pode apontar o menu lateral “Produtos” para{" "}
+        <code className="px-1 py-0.5 bg-gray-100 rounded">
+          /vendedor/produtos/hub
+        </code>{" "}
+        sem alterar suas páginas atuais.
       </div>
     </div>
   );

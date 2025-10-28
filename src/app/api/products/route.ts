@@ -1,25 +1,29 @@
 // src/app/api/products/route.ts
 import "server-only";
 import { NextRequest, NextResponse } from "next/server";
-import { adminDb } from "@/lib/firebaseAdmin";
+import { adminAuth, adminDb } from "@/lib/firebaseAdmin";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 type Product = {
+  id?: string;
   sku: string;
   name: string;
-  categoryCode?: string | null;
-  prefix?: string | null;
   unit?: string;
-  active?: boolean;
+  category?: string | null;
+  categoryCode?: string | null;
+  images?: string[];
+  image?: string;
   price?: number;
   stock?: number;
-  images?: string[];
+  active?: boolean;
+  deleted?: boolean;
   ownerId?: string | null;
-  createdAt?: Date | string;
-  updatedAt?: Date | string;
+  vendorUid?: string | null;
+  createdAt?: any;
+  updatedAt?: any;
   [k: string]: unknown;
 };
 
@@ -29,87 +33,129 @@ function errMsg(e: unknown) {
 function asRecord(u: unknown): Record<string, unknown> {
   return u && typeof u === "object" ? (u as Record<string, unknown>) : {};
 }
+function tsToMillis(v: any): number | undefined {
+  if (!v) return undefined;
+  if (typeof v.toMillis === "function") return v.toMillis();
+  if (typeof v._seconds === "number") return v._seconds * 1000;
+  if (typeof v === "string" || v instanceof Date) return new Date(v as any).getTime();
+  return undefined;
+}
 function toProduct(id: string, raw: Record<string, unknown>): Product {
+  const createdMs = tsToMillis(raw.createdAt);
+  const updatedMs = tsToMillis(raw.updatedAt);
   return {
+    id,
     sku: String(raw.sku ?? id),
     name: String(raw.name ?? ""),
-    categoryCode: (raw.categoryCode as string | null) ?? null,
-    prefix: (raw.prefix as string | null) ?? null,
     unit: typeof raw.unit === "string" ? raw.unit : "un",
-    active: typeof raw.active === "boolean" ? raw.active : true,
+    category: (raw.category as string | null) ?? null,
+    categoryCode: (raw.categoryCode as string | null) ?? null,
+    images: Array.isArray(raw.images) ? (raw.images.filter((x) => typeof x === "string") as string[]) : undefined,
+    image: typeof raw.image === "string" ? raw.image : undefined,
     price: typeof raw.price === "number" ? raw.price : undefined,
     stock: typeof raw.stock === "number" ? raw.stock : undefined,
-    images: Array.isArray(raw.images)
-      ? (raw.images.filter((x) => typeof x === "string") as string[])
-      : undefined,
+    active: typeof raw.active === "boolean" ? raw.active : true,
+    deleted: raw.deleted === true ? true : false,
     ownerId: (raw.ownerId as string | null) ?? null,
-    createdAt: (raw.createdAt as Date | string | undefined) ?? undefined,
-    updatedAt: (raw.updatedAt as Date | string | undefined) ?? undefined,
+    vendorUid: (raw.vendorUid as string | null) ?? null,
+    createdAt: createdMs ? new Date(createdMs).toISOString() : undefined,
+    updatedAt: updatedMs ? new Date(updatedMs).toISOString() : undefined,
     ...raw,
   };
 }
-function sanitizeUpsert(body: Record<string, unknown>): Partial<Product> & { sku?: string; name?: string } {
-  const p: Partial<Product> & { sku?: string; name?: string } = {};
-  if (typeof body.sku === "string") p.sku = body.sku.trim();
-  if (typeof body.name === "string") p.name = body.name.trim();
-  if (typeof body.categoryCode === "string" || body.categoryCode === null) p.categoryCode = body.categoryCode ?? null;
-  if (typeof body.prefix === "string" || body.prefix === null) p.prefix = body.prefix ?? null;
-  if (typeof body.unit === "string") p.unit = body.unit;
-  if (typeof body.active === "boolean") p.active = body.active;
-  if (typeof body.price === "number" && Number.isFinite(body.price)) p.price = body.price;
-  if (typeof body.stock === "number" && Number.isFinite(body.stock)) p.stock = body.stock;
-  if (Array.isArray(body.images)) p.images = body.images.filter((x) => typeof x === "string") as string[];
-  if (typeof body.ownerId === "string" || body.ownerId === null) p.ownerId = body.ownerId ?? null;
-  return p;
+function parseBoolParam(v: string | null | undefined): boolean | undefined {
+  if (v == null) return undefined;
+  const s = v.toLowerCase();
+  if (["true", "1", "yes", "y"].includes(s)) return true;
+  if (["false", "0", "no", "n"].includes(s)) return false;
+  return undefined;
 }
 
-/**
- * GET /api/products
- * Query params:
- *  - q: busca por prefixo/exato em sku ou case-insensitive em name (filtro em memória após query simples)
- *  - category: categoryCode
- *  - active: "true" | "false"
- *  - limit: default 50 (máx 200)
- *  - order: "name" | "sku" | "updatedAt" (default "updatedAt")
- *  - dir: "asc" | "desc" (default "desc")
- */
 export async function GET(req: NextRequest) {
   try {
     const url = new URL(req.url);
     const q = (url.searchParams.get("q") || "").trim();
-    const category = url.searchParams.get("category");
-    const activeParam = url.searchParams.get("active");
-    const order = (url.searchParams.get("order") || "updatedAt").toLowerCase();
-    const dir = (url.searchParams.get("dir") || "desc").toLowerCase();
+    const categoryParam = url.searchParams.get("category") || url.searchParams.get("categoryCode") || "";
+    const activeParam = parseBoolParam(url.searchParams.get("active"));
     const limitParam = Number(url.searchParams.get("limit") ?? "50");
-
     const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 200) : 50;
-    const orderField = order === "name" ? "name" : order === "sku" ? "sku" : "updatedAt";
-    const orderDir: "asc" | "desc" = dir === "asc" ? "asc" : "desc";
+    const order = (url.searchParams.get("order") || "createdAt").toLowerCase();
+    const orderField = order === "updatedat" || order === "updatedAt" ? "updatedAt" : "createdAt";
+    const offsetId = url.searchParams.get("offset");
+    const ownerIdFromQuery = url.searchParams.get("ownerId") || "";
 
-    let query = adminDb.collection("products").orderBy(orderField, orderDir);
-
-    if (category) {
-      query = query.where("categoryCode", "==", category);
+    // 1) Tenta autenticar por Bearer
+    let uid: string | null = null;
+    const auth = req.headers.get("authorization") || "";
+    const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+    if (token) {
+      try {
+        const decoded = await adminAuth.verifyIdToken(token);
+        uid = decoded.uid;
+      } catch {
+        // token inválido → ignora e tenta ownerId=query
+      }
     }
-    if (activeParam === "true") query = query.where("active", "==", true);
-    if (activeParam === "false") query = query.where("active", "==", false);
+    // 2) Se não tem token, usa ownerId= da query (fallback)
+    if (!uid && ownerIdFromQuery) {
+      uid = ownerIdFromQuery;
+    }
 
-    const snap = await query.limit(limit).get();
+    if (!uid) {
+      return NextResponse.json(
+        { ok: true, count: 0, items: [], hint: "Envie Authorization: Bearer <token> ou ?ownerId=<uid>" },
+        { status: 200, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
+    const coll = adminDb.collection("products");
+    const getStartAfterDoc = async () => (offsetId ? await coll.doc(offsetId).get() : null);
+    const startAfterDoc = await getStartAfterDoc();
+
+    const buildQuery = (by: "ownerId" | "vendorUid") => {
+      let qref = coll.where(by, "==", uid!).orderBy(orderField, "desc");
+      if (startAfterDoc?.exists) qref = qref.startAfter(startAfterDoc);
+      return qref.limit(limit);
+    };
+
+    const [snapA, snapB] = await Promise.all([buildQuery("ownerId").get(), buildQuery("vendorUid").get()]);
+
+    const seen = new Set<string>();
     let items: Product[] = [];
-    snap.forEach((doc) => {
-      items.push(toProduct(doc.id, asRecord(doc.data())));
-    });
+    for (const d of [...snapA.docs, ...snapB.docs]) {
+      if (seen.has(d.id)) continue;
+      seen.add(d.id);
+      items.push(toProduct(d.id, asRecord(d.data())));
+    }
 
-    // filtro de busca leve em memória (para q pequeno)
+    // Filtros suaves
+    items = items.filter((p) => p.deleted !== true);
+    if (typeof activeParam === "boolean") {
+      items = items.filter((p) => (p.active === undefined ? true : p.active) === activeParam);
+    }
+    if (categoryParam) {
+      const cat = categoryParam.toLowerCase();
+      items = items.filter((p) => {
+        const c1 = (p.category || "").toString().toLowerCase();
+        const c2 = (p.categoryCode || "").toString().toLowerCase();
+        return c1 === cat || c2 === cat;
+      });
+    }
     if (q) {
       const nq = q.toLowerCase();
       items = items.filter(
         (p) =>
-          p.sku.toLowerCase().includes(nq) ||
-          (typeof p.name === "string" && p.name.toLowerCase().includes(nq))
+          (p.sku || "").toString().toLowerCase().includes(nq) ||
+          (p.name || "").toString().toLowerCase().includes(nq)
       );
     }
+
+    // Ordena novamente
+    items.sort((a, b) => {
+      const ta = tsToMillis(a[orderField as "createdAt" | "updatedAt"]) ?? 0;
+      const tb = tsToMillis(b[orderField as "createdAt" | "updatedAt"]) ?? 0;
+      return tb - ta;
+    });
 
     return NextResponse.json(
       { ok: true, count: items.length, items },
@@ -125,42 +171,99 @@ export async function GET(req: NextRequest) {
 
 /**
  * POST /api/products
- * Body JSON (mínimo): { sku: string, name: string, ...campos opcionais }
- * Se o doc já existir, faz merge (upsert).
+ * Upsert de 1 item para o usuário autenticado (ou ownerId passado na query, fallback).
+ * Agora também espelha o registro em `seller_products` para o catálogo do vendedor.
  */
 export async function POST(req: NextRequest) {
   try {
-    const bodyUnknown = await req.json().catch(() => ({}));
-    if (!bodyUnknown || typeof bodyUnknown !== "object") {
-      return NextResponse.json({ ok: false, error: "Body inválido" }, { status: 400 });
-    }
-    const patch = sanitizeUpsert(asRecord(bodyUnknown));
-    const sku = typeof patch.sku === "string" ? patch.sku.trim() : "";
-    const name = typeof patch.name === "string" ? patch.name.trim() : "";
+    // uid por token → fallback ownerId=query
+    const url = new URL(req.url);
+    let uid: string | null = null;
 
-    if (!sku || !name) {
-      return NextResponse.json(
-        { ok: false, error: "Campos 'sku' e 'name' são obrigatórios" },
-        { status: 400 }
-      );
+    const auth = req.headers.get("authorization") || "";
+    const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+    if (token) {
+      try {
+        const decoded = await adminAuth.verifyIdToken(token);
+        uid = decoded.uid;
+      } catch {}
     }
+    if (!uid) uid = url.searchParams.get("ownerId");
+
+    if (!uid) {
+      return NextResponse.json({ ok: false, error: "missing uid (Bearer token ou ?ownerId=)" }, { status: 401 });
+    }
+
+    const body = asRecord(await req.json().catch(() => ({})));
+    const sku = typeof body.sku === "string" ? body.sku.trim() : "";
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    if (!sku || !name) {
+      return NextResponse.json({ ok: false, error: "Campos 'sku' e 'name' são obrigatórios" }, { status: 400 });
+    }
+
+    const productsColl = adminDb.collection("products");
+
+    // Busca por SKU do mesmo dono (ownerId/vendorUid)
+    let snap = await productsColl.where("ownerId", "==", uid).where("sku", "==", sku).limit(1).get();
+    if (snap.empty) {
+      snap = await productsColl.where("vendorUid", "==", uid).where("sku", "==", sku).limit(1).get();
+    }
+    const productRef = snap.empty ? productsColl.doc() : snap.docs[0].ref;
 
     const now = new Date();
-    const docRef = adminDb.collection("products").doc(sku);
-    await docRef.set(
-      {
-        ...patch,
-        sku,
-        name,
-        updatedAt: now,
-        createdAt: now, // permanece se já existir
-      },
-      { merge: true }
-    );
+    const basePayload: Partial<Product> = {
+      sku,
+      name,
+      unit: typeof body.unit === "string" ? body.unit : "un",
+      category: (body.category as string) ?? undefined,
+      categoryCode: (body.categoryCode as string) ?? undefined,
+      images: Array.isArray(body.images) ? (body.images.filter((x) => typeof x === "string") as string[]) : undefined,
+      image: typeof body.image === "string" ? body.image : undefined,
+      price: typeof body.price === "number" ? body.price : undefined,
+      stock: typeof body.stock === "number" ? body.stock : undefined,
+      active: typeof body.active === "boolean" ? body.active : true,
+      deleted: body.deleted === true ? true : false,
+      ownerId: uid,
+      vendorUid: uid,
+      updatedAt: now,
+      ...(snap.empty ? { createdAt: now } : {}),
+    };
 
-    const fresh = await docRef.get();
+    // 1) Upsert em `products`
+    await productRef.set(basePayload, { merge: true });
+
+    // 2) Espelhamento em `seller_products` (índice do vendedor)
+    //    — docId determinístico: <sellerId>__<sku>
+    const sellerDocId = `${uid}__${sku}`;
+    const sellerRef = adminDb.collection("seller_products").doc(sellerDocId);
+    const sellerPayload = {
+      sellerId: uid,
+      ownerId: uid,
+      vendorUid: uid,
+      sku,
+      name,
+      categoryCode: (body.categoryCode as string) ?? null,
+      price: typeof body.price === "number" ? body.price : 0,
+      stock: typeof body.stock === "number" ? body.stock : 0,
+      active: typeof body.active === "boolean" ? body.active : true,
+      imageUrls: Array.isArray(body.images)
+        ? (body.images.filter((x) => typeof x === "string") as string[])
+        : typeof body.image === "string" && body.image
+        ? [body.image]
+        : [],
+      updatedAt: now,
+      ...(snap.empty ? { createdAt: now } : {}),
+    };
+    await sellerRef.set(sellerPayload, { merge: true });
+
+    // 3) Retorna o produto salvo (do catálogo)
+    const fresh = await productRef.get();
     const data = toProduct(fresh.id, asRecord(fresh.data()));
-    return NextResponse.json({ ok: true, item: data }, { status: 200, headers: { "Cache-Control": "no-store" } });
+
+    return NextResponse.json(
+      { ok: true, item: data },
+      { status: 200, headers: { "Cache-Control": "no-store" } }
+    );
   } catch (e: unknown) {
     return NextResponse.json(
       { ok: false, error: errMsg(e) },

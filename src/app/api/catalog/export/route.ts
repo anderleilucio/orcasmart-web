@@ -1,4 +1,3 @@
-// src/app/api/catalog/export/route.ts
 import "server-only";
 import { NextRequest, NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebaseAdmin";
@@ -7,35 +6,15 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-type CatalogCategory = {
-  code: string;
-  name: string;
-  slug?: string;
-  parentCode?: string | null;
-  position?: number;
-  active?: boolean;
-  [k: string]: unknown;
-};
-
-type CatalogRule = {
-  id: string;
-  pattern: string;
-  action: string;
-  enabled: boolean;
-  priority?: number;
-  ownerId?: string | null;
-  [k: string]: unknown;
-};
-
 function errMsg(e: unknown) {
   return e instanceof Error ? e.message : "Erro desconhecido";
 }
 
 function asRecord(u: unknown): Record<string, unknown> {
-  return (u && typeof u === "object") ? (u as Record<string, unknown>) : {};
+  return u && typeof u === "object" ? (u as Record<string, unknown>) : {};
 }
 
-function toCategory(id: string, raw: Record<string, unknown>): CatalogCategory {
+function toCategory(id: string, raw: Record<string, unknown>) {
   return {
     code: String(raw.code ?? id),
     name: String(raw.name ?? ""),
@@ -43,11 +22,10 @@ function toCategory(id: string, raw: Record<string, unknown>): CatalogCategory {
     parentCode: (raw.parentCode as string | null) ?? null,
     position: typeof raw.position === "number" ? raw.position : undefined,
     active: typeof raw.active === "boolean" ? raw.active : true,
-    ...raw,
   };
 }
 
-function toRule(id: string, raw: Record<string, unknown>): CatalogRule {
+function toRule(id: string, raw: Record<string, unknown>) {
   return {
     id,
     pattern: String(raw.pattern ?? ""),
@@ -55,7 +33,6 @@ function toRule(id: string, raw: Record<string, unknown>): CatalogRule {
     enabled: Boolean(raw.enabled ?? true),
     priority: typeof raw.priority === "number" ? raw.priority : undefined,
     ownerId: (raw.ownerId as string | null) ?? null,
-    ...raw,
   };
 }
 
@@ -63,14 +40,17 @@ function toRule(id: string, raw: Record<string, unknown>): CatalogRule {
 export async function GET(req: NextRequest) {
   try {
     const url = new URL(req.url);
-    const format = (url.searchParams.get("format") || "json").toLowerCase();
-    const section = (url.searchParams.get("section") || "all").toLowerCase();
+    const queryFormat = (url.searchParams.get("format") || "").toLowerCase();
+    const acceptHeader = req.headers.get("accept") || "";
+    const format =
+      queryFormat || acceptHeader.includes("text/csv") ? "csv" : "json";
 
+    const section = (url.searchParams.get("section") || "all").toLowerCase();
     const wantCats = section === "all" || section === "categories";
     const wantRules = section === "all" || section === "rules";
 
-    let categories: CatalogCategory[] = [];
-    let rules: CatalogRule[] = [];
+    let categories: any[] = [];
+    let rules: any[] = [];
 
     if (wantCats) {
       const cs = await adminDb.collection("catalog_categories").get();
@@ -92,7 +72,9 @@ export async function GET(req: NextRequest) {
             JSON.stringify(c.name ?? ""),
             JSON.stringify(c.slug ?? ""),
             JSON.stringify(c.parentCode ?? ""),
-            JSON.stringify(typeof c.position === "number" ? String(c.position) : ""),
+            JSON.stringify(
+              typeof c.position === "number" ? String(c.position) : ""
+            ),
             JSON.stringify(String(c.active ?? true)),
           ].join(",");
           parts.push(line);
@@ -108,7 +90,9 @@ export async function GET(req: NextRequest) {
             JSON.stringify(r.pattern ?? ""),
             JSON.stringify(r.action ?? ""),
             JSON.stringify(String(r.enabled ?? true)),
-            JSON.stringify(typeof r.priority === "number" ? String(r.priority) : ""),
+            JSON.stringify(
+              typeof r.priority === "number" ? String(r.priority) : ""
+            ),
             JSON.stringify(r.ownerId ?? ""),
           ].join(",");
           parts.push(line);
@@ -119,6 +103,7 @@ export async function GET(req: NextRequest) {
         status: 200,
         headers: {
           "Content-Type": "text/csv; charset=utf-8",
+          "Content-Disposition": 'attachment; filename="catalog_export.csv"',
           "Cache-Control": "no-store",
         },
       });
@@ -129,9 +114,15 @@ export async function GET(req: NextRequest) {
     if (wantCats) payload.categories = categories;
     if (wantRules) payload.rules = rules;
 
-    return NextResponse.json(payload, { status: 200, headers: { "Cache-Control": "no-store" } });
+    return NextResponse.json(payload, {
+      status: 200,
+      headers: { "Cache-Control": "no-store" },
+    });
   } catch (e: unknown) {
-    return NextResponse.json({ error: errMsg(e) }, { status: 400, headers: { "Cache-Control": "no-store" } });
+    return NextResponse.json(
+      { error: errMsg(e) },
+      { status: 400, headers: { "Cache-Control": "no-store" } }
+    );
   }
 }
 
