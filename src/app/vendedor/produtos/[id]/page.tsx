@@ -6,7 +6,7 @@ import { useRouter, useParams } from "next/navigation";
 import Link from "next/link";
 import { auth } from "@/lib/firebase";
 import { onAuthStateChanged, User } from "firebase/auth";
-import { uploadProductImageWithPath } from "@/lib/uploadImage";
+import { uploadProductImage } from "@/lib/uploadImage";
 
 type Prod = {
   id: string;
