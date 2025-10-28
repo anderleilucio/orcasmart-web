@@ -59,7 +59,7 @@ function toImages(val: any): string[] {
   return Array.from(new Set(list));
 }
 
-ffunction headerKey(s: string): string {
+function headerKey(s: string): string {
   // Normaliza cabeçalhos: remove BOM, acentos, espaços e deixa lowercase
   return s
     .replace(/\ufeff/g, "") // 🧹 remove caractere BOM (UTF-8 com BOM)
