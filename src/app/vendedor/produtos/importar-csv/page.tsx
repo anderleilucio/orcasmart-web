@@ -1,84 +1,149 @@
 // src/app/vendedor/produtos/importar-csv/page.tsx
 "use client";
-export const dynamic = "force-dynamic";
-export const revalidate = 0;
+
 import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import Papa, { ParseResult } from "papaparse";
 import { auth } from "@/lib/firebase";
 import { onAuthStateChanged } from "firebase/auth";
-import Papa from "papaparse";
 
-type Row = {
-  sku: string;
-  nome?: string;
-  name?: string;
-  preco?: string | number;
-  price?: string | number;
-  estoque?: string | number;
-  stock?: string | number;
-  ativo?: string | boolean;
-  unidade?: string;
-  images?: string | string[];
-  imagens?: string | string[];
-  imagem?: string;
-  image?: string;
-  imageUrl?: string;
-  categoryCode?: string;
-  category?: string;
-  categoria?: string;
-};
+/* -------- Next cache control (não prerender) -------- */
+export const dynamic = "force-dynamic";
 
-type Canon = {
+/* -------- Tipos -------- */
+type CsvRow = Record<string, any>;
+
+type NormalizedRow = {
   sku: string;
-  nome: string;
-  preco: string | number;
-  estoque: string | number;
-  ativo: boolean | string;
-  unidade: string;
-  imagens: string[];
+  name: string;
+  price: number;
+  stock: number;
+  active: boolean;
+  unit: string;
+  imageUrls: string[];
   categoryCode?: string;
 };
 
-function parseBool(v: any, def = true) {
+/* -------- Utils -------- */
+function parseBool(v: any, def = true): boolean {
+  if (typeof v === "boolean") return v;
   const s = String(v ?? "").trim().toLowerCase();
   if (["false", "0", "nao", "não", "no", "n", "inativo", "inactive"].includes(s)) return false;
   if (["true", "1", "sim", "yes", "y", "ativo", "active"].includes(s)) return true;
-  return typeof v === "boolean" ? v : def;
+  return def;
 }
 
-function parseNumBR(v: any, def = 0) {
+function parseNumBR(v: any, def = 0): number {
   if (typeof v === "number" && Number.isFinite(v)) return v;
-  const s = String(v ?? "").trim();
-  if (!s) return def;
-  let t = s.replace(/\s+/g, "");
+  const str = String(v ?? "").trim();
+  if (!str) return def;
+  let t = str.replace(/\s+/g, "");
   if (t.includes(",") && t.includes(".")) t = t.replace(/\./g, "").replace(",", ".");
   else if (t.includes(",")) t = t.replace(",", ".");
   const n = Number(t);
   return Number.isFinite(n) ? n : def;
 }
 
-function toArrayImages(anyVal: any): string[] {
-  if (Array.isArray(anyVal)) return anyVal.map(String).map((s) => s.trim()).filter(Boolean);
-  if (typeof anyVal === "string") {
-    return anyVal
-      .split(/\n|;|,|\|/g)
-      .map((s) => s.trim())
-      .filter(Boolean);
-  }
-  return [];
+function toImages(val: any): string[] {
+  const raw =
+    Array.isArray(val) ? val :
+    typeof val === "string" ? val :
+    "";
+  const list = Array.isArray(raw)
+    ? raw
+    : String(raw)
+        .split(/\n|;|,|\|/g)
+        .map((s) => s.trim())
+        .filter(Boolean);
+  return Array.from(new Set(list));
 }
 
+ffunction headerKey(s: string): string {
+  // Normaliza cabeçalhos: remove BOM, acentos, espaços e deixa lowercase
+  return s
+    .replace(/\ufeff/g, "") // 🧹 remove caractere BOM (UTF-8 com BOM)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, "")
+    .toLowerCase();
+}
+
+function normalizeRow(r: CsvRow): NormalizedRow | null {
+  // Mapear campos por aliases
+  const map: Record<string, any> = {};
+  for (const [k, v] of Object.entries(r)) {
+    map[headerKey(k)] = v;
+  }
+
+  const sku = String(map["sku"] ?? "").trim();
+  const name = String(map["nome"] ?? map["name"] ?? "").trim();
+  if (!sku || !name) return null;
+
+  const price = parseNumBR(map["preco"] ?? map["preço"] ?? map["price"], 0);
+  const stock = parseNumBR(map["estoque"] ?? map["stock"], 0);
+  const active = parseBool(map["ativo"] ?? map["active"], true);
+  const unit = (String(map["unidade"] ?? map["unit"] ?? "un").trim() || "un");
+  const categoryCode = String(map["categorycode"] ?? map["category"] ?? map["categoria"] ?? "")
+    .trim() || undefined;
+
+  const imageUrls = toImages(
+    map["imagens"] ??
+    map["images"] ??
+    map["imagem"] ??
+    map["image"]
+  );
+
+  return { sku, name, price, stock, active, unit, imageUrls, categoryCode };
+}
+
+/* -------- Parsing robusto: tenta vírgula, “;” e encoding fallback -------- */
+function parseCsvFile(file: File): Promise<ParseResult<CsvRow>> {
+  const attempt = (opts: Partial<Papa.ParseLocalConfig<CsvRow>>): Promise<ParseResult<CsvRow>> =>
+    new Promise((resolve, reject) => {
+      Papa.parse<CsvRow>(file, {
+        header: true,
+        skipEmptyLines: "greedy",
+        ...opts,
+        complete: (res) => resolve(res),
+        error: (err) => reject(err),
+      });
+    });
+
+  return (async () => {
+    // 1) Tentativa padrão: UTF-8, autodetect delimiter
+    let res = await attempt({ encoding: "utf-8" });
+
+    // Se veio 1 campo só e parece “SKU;Nome;…”, reparse com ';'
+    const fields = (res.meta.fields || []).map((f) => String(f));
+    if (fields.length <= 1) {
+      // Reparse com ';'
+      res = await attempt({ encoding: "utf-8", delimiter: ";" });
+    }
+
+    // Se ainda falhar (campos 1), tenta fallback de encoding ISO-8859-1
+    const fields2 = (res.meta.fields || []).map((f) => String(f));
+    if (fields2.length <= 1) {
+      res = await attempt({ encoding: "ISO-8859-1" });
+      const fields3 = (res.meta.fields || []).map((f) => String(f));
+      if (fields3.length <= 1) {
+        res = await attempt({ encoding: "ISO-8859-1", delimiter: ";" });
+      }
+    }
+
+    return res;
+  })();
+}
+
+/* -------- Página -------- */
 export default function ImportarCsvPage() {
   const router = useRouter();
   const [uid, setUid] = useState<string | null>(null);
 
-  // linhas brutas do CSV (apenas para contagem)
-  const [rowsTotal, setRowsTotal] = useState<number>(0);
-  // linhas normalizadas prontas para enviar ao backend
-  const [valid, setValid] = useState<Canon[]>([]);
-  const [msg, setMsg] = useState<string | null>(null);
+  const [rawRows, setRawRows] = useState<CsvRow[]>([]);
+  const [validRows, setValidRows] = useState<NormalizedRow[]>([]);
   const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
@@ -88,99 +153,55 @@ export default function ImportarCsvPage() {
     return () => unsub();
   }, [router]);
 
-  const validCount = valid.length;
-
-  function handleFile(file: File) {
+  async function onPickFile(f: File) {
     setMsg(null);
     setBusy(true);
-    Papa.parse<Row>(file, {
-      header: true,
-      skipEmptyLines: "greedy",
-      transformHeader: (h) => String(h ?? "").trim(),
-      complete: (res) => {
-        const data = (res.data || []).map((r) => {
-          const sku = String(r.sku ?? "").trim();
-          const nome = String(r.nome ?? r.name ?? "").trim();
+    try {
+      const parsed = await parseCsvFile(f);
 
-          // Mantemos número já normalizado (back aceita . ou ,)
-          const preco =
-            r.preco != null || r.price != null
-              ? (r.preco ?? r.price)!
-              : "0,00";
-          const estoque =
-            r.estoque != null || r.stock != null
-              ? (r.estoque ?? r.stock)!
-              : "0";
+      const data = (parsed.data || []) as CsvRow[];
 
-          const ativo = parseBool(r.ativo, true);
-          const unidade = String((r as any).unidade ?? "un").trim() || "un";
+      // Normaliza cada linha e descarta inválidas (SKU/Nome faltando)
+      const normalized: NormalizedRow[] = [];
+      for (const r of data) {
+        const n = normalizeRow(r);
+        if (n) normalized.push(n);
+      }
 
-          const categoryCode =
-            String(
-              (r as any).categoryCode ??
-                (r as any).category ??
-                (r as any).categoria ??
-                ""
-            ).trim() || undefined;
+      setRawRows(data);
+      setValidRows(normalized);
 
-          const imgs = toArrayImages(
-            (r as any).imagens ??
-              (r as any).images ??
-              (r as any).imagem ??
-              (r as any).image ??
-              (r as any).imageUrl
-          );
-
-          return {
-            sku,
-            nome,
-            preco,
-            estoque,
-            ativo,
-            unidade,
-            imagens: imgs,
-            categoryCode,
-          } as Canon;
-        });
-
-        const filtered = data.filter((x) => x.sku && (x.nome || "").trim());
-        setRowsTotal(res.data?.length || 0);
-        setValid(filtered);
-        setBusy(false);
-      },
-      error: (e) => {
-        setMsg(e?.message || "Falha ao ler CSV.");
-        setBusy(false);
-      },
-      encoding: "utf-8",
-    });
+      if (!normalized.length) {
+        setMsg(
+          "Nenhuma linha válida encontrada. Verifique os cabeçalhos (SKU, Nome, Preço/Preco, Estoque, Ativo, Unidade, Imagens) e o separador (vírgula ou ponto e vírgula)."
+        );
+      }
+    } catch (e: any) {
+      setMsg(e?.message || "Falha ao ler o arquivo CSV.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function doImport() {
     if (!uid) return alert("Faça login.");
-    if (!validCount) return alert("Nenhuma linha válida.");
+    if (!validRows.length) return alert("Nenhuma linha válida para importar.");
+
     setBusy(true);
     setMsg(null);
     try {
       const token = await auth.currentUser?.getIdToken();
-
-      // 🔒 Envia no formato canônico que o backend já entende
       const res = await fetch("/api/products/import", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ items: valid }),
+        body: JSON.stringify({ items: validRows }),
       });
-
       const j = await res.json().catch(() => ({}));
       if (!res.ok || j?.ok === false) throw new Error(j?.error || `HTTP ${res.status}`);
-
-      setMsg(`Importação concluída. Itens processados: ${j?.upserted ?? validCount}.`);
-      // limpa após sucesso (opcional)
-      // setValid([]);
-      // setRowsTotal(0);
+      setMsg(`✅ Importação concluída. Itens processados: ${j?.upserted ?? validRows.length}.`);
     } catch (e: any) {
       setMsg(e?.message || "Falha ao importar.");
     } finally {
@@ -188,7 +209,7 @@ export default function ImportarCsvPage() {
     }
   }
 
-  const preview = useMemo(() => valid.slice(0, 20), [valid]);
+  const preview = useMemo(() => validRows.slice(0, 20), [validRows]);
 
   if (!uid) return <main className="p-6">Carregando…</main>;
 
@@ -202,33 +223,34 @@ export default function ImportarCsvPage() {
       </div>
 
       <p className="text-sm opacity-70">
-        Faça upload de um arquivo <code>.csv</code> com cabeçalhos:{" "}
-        <strong>SKU, Nome, Preço, Estoque, Ativo, Unidade, Imagens</strong>.
+        Faça upload de um arquivo <code>.csv</code> com cabeçalhos:
+        <strong> SKU, Nome, Preço/Preco, Estoque, Ativo, Unidade, Imagens</strong>.
+        Aceita vírgula <code>,</code> ou ponto e vírgula <code>;</code>.
       </p>
 
       <div className="flex items-center gap-3">
         <input
           type="file"
           accept=".csv,text/csv"
-          onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
+          onChange={(e) => e.target.files?.[0] && onPickFile(e.target.files[0])}
         />
         <button
           onClick={doImport}
-          disabled={!validCount || busy}
+          disabled={!validRows.length || busy}
           className="rounded-lg bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white px-4 py-2 text-sm"
         >
           {busy ? "Importando…" : "Importar no catálogo"}
         </button>
       </div>
 
+      <div className="text-sm">
+        Linhas válidas: <strong>{validRows.length}</strong>
+        {rawRows.length ? <> (de {rawRows.length})</> : null}
+      </div>
+
       {msg && (
         <div className="rounded-lg border px-4 py-3 text-sm">{msg}</div>
       )}
-
-      <div className="text-sm">
-        Linhas válidas: <strong>{validCount}</strong>
-        {rowsTotal ? ` (de ${rowsTotal})` : null}
-      </div>
 
       {preview.length > 0 && (
         <div className="overflow-x-auto rounded-lg border">
@@ -248,22 +270,20 @@ export default function ImportarCsvPage() {
               {preview.map((r, i) => (
                 <tr key={i} className="border-t">
                   <td className="p-2">{r.sku}</td>
-                  <td className="p-2">{r.nome}</td>
+                  <td className="p-2">{r.name}</td>
                   <td className="p-2 text-right">
-                    {Number(parseNumBR(r.preco)).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                    {Number(r.price ?? 0).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
                   </td>
-                  <td className="p-2 text-right">
-                    {Number(parseNumBR(r.estoque)).toLocaleString("pt-BR")}
-                  </td>
-                  <td className="p-2">{parseBool(r.ativo, true) ? "sim" : "não"}</td>
-                  <td className="p-2">{r.unidade || "un"}</td>
+                  <td className="p-2 text-right">{r.stock ?? 0}</td>
+                  <td className="p-2">{r.active ? "sim" : "não"}</td>
+                  <td className="p-2">{r.unit || "un"}</td>
                   <td className="p-2">
-                    {r.imagens.slice(0, 2).map((u, k) => (
+                    {r.imageUrls?.slice(0, 2).map((u, k) => (
                       <span key={k} className="mr-2 underline">
                         {u.length > 28 ? u.slice(0, 28) + "…" : u}
                       </span>
                     ))}
-                    {r.imagens.length > 2 ? "…" : null}
+                    {r.imageUrls && r.imageUrls.length > 2 ? "…" : null}
                   </td>
                 </tr>
               ))}
