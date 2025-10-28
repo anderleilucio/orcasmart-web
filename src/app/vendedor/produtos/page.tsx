@@ -1,3 +1,4 @@
+// src/app/vendedor/produtos/page.tsx
 "use client";
 
 import Link from "next/link";
@@ -13,6 +14,7 @@ type Prod = {
   price: number;
   stock: number;
   active?: boolean;
+  image?: string;        // 👈 novo
   imageUrls?: string[];
 };
 
@@ -57,12 +59,25 @@ export default function ProdutosPage() {
       (typeof crypto !== "undefined"
         ? crypto.randomUUID()
         : `${x.sku}-${Math.random()}`);
-    const imageUrls = Array.isArray(x.imageUrls)
-      ? x.imageUrls.filter((u: any) => typeof u === "string" && u)
-      : [];
+
+    // normaliza imageUrls (aceita string ou array)
+    const rawImgs =
+      x.imageUrls ??
+      x.images ??
+      x.imagens ??
+      (typeof x.image === "string" ? [x.image] : []);
+
+    const imageUrls: string[] = Array.isArray(rawImgs)
+      ? rawImgs.filter((u: any) => typeof u === "string" && u.trim())
+      : String(rawImgs || "")
+          .split(/\n|;|,|\|/g)
+          .map((s) => s.trim())
+          .filter(Boolean);
+
     const price = Number(x.price ?? 0);
     const stock = Number(x.stock ?? 0);
     const active = x.active !== false;
+
     return {
       id,
       sku: String(x.sku ?? ""),
@@ -70,15 +85,15 @@ export default function ProdutosPage() {
       price,
       stock,
       active,
+      image: typeof x.image === "string" ? x.image : undefined, // 👈 traz image se existir
       imageUrls,
     };
   }
 
   async function fetchProducts(uid: string) {
     const token = await auth.currentUser?.getIdToken();
-  
     const url = `/api/seller-products/list?sellerId=${encodeURIComponent(uid)}&_=${Date.now()}`;
-  
+
     const res = await fetch(url, {
       method: "GET",
       cache: "no-store",
@@ -88,12 +103,12 @@ export default function ProdutosPage() {
       },
       next: { revalidate: 0 },
     });
-  
+
     const body: any = await res.json().catch(() => ({}));
     if (!res.ok || body?.ok === false) {
       throw new Error(body?.error ?? `HTTP ${res.status}`);
     }
-  
+
     const listRaw: any[] = Array.isArray(body.items) ? body.items : [];
     return listRaw.map(normalizeApiItem);
   }
@@ -264,47 +279,53 @@ export default function ProdutosPage() {
         </div>
       ) : (
         <ul className="divide-y rounded-xl border">
-          {visibleItems.map((p) => (
-            <li
-              key={p.id}
-              className="flex items-center justify-between gap-3 px-4 py-4"
-            >
-              <div className="flex items-center gap-3">
-                {p.imageUrls?.length ? (
-                  <img
-                    src={p.imageUrls[0]}
-                    alt=""
-                    className="h-14 w-14 rounded-lg border object-cover"
-                  />
-                ) : (
-                  <div className="h-14 w-14 rounded-lg border bg-slate-50" />
-                )}
-                <div>
-                  <div className="font-medium">
-                    {p.name}{" "}
-                    <span className="opacity-60">— {p.sku}</span>
+          {visibleItems.map((p) => {
+            const thumb = p.image || p.imageUrls?.[0] || "";
+            return (
+              <li
+                key={p.id}
+                className="flex items-center justify-between gap-3 px-4 py-4"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="h-14 w-14 rounded-lg border bg-white overflow-hidden flex items-center justify-center">
+                    {thumb ? (
+                      <img
+                        src={thumb}
+                        alt={p.name}
+                        className="h-full w-full object-cover"
+                        referrerPolicy="no-referrer"
+                      />
+                    ) : (
+                      <span className="text-xs opacity-50">sem foto</span>
+                    )}
                   </div>
-                  <div className="text-sm opacity-70">
-                    R$
-                    {Number(p.price).toLocaleString("pt-BR", {
-                      minimumFractionDigits: 2,
-                    })}{" "}
-                    • Estoque: {p.stock ?? 0} •{" "}
-                    {p.active !== false ? "ativo" : "inativo"}
+
+                  <div>
+                    <div className="font-medium">
+                      {p.name} <span className="opacity-60">— {p.sku}</span>
+                    </div>
+                    <div className="text-sm opacity-70">
+                      R{"$"}
+                      {Number(p.price).toLocaleString("pt-BR", {
+                        minimumFractionDigits: 2,
+                      })}{" "}
+                      • Estoque: {p.stock ?? 0} •{" "}
+                      {p.active !== false ? "ativo" : "inativo"}
+                    </div>
                   </div>
                 </div>
-              </div>
 
-              <div className="flex gap-2">
-                <Link
-                  href={`/vendedor/produtos/${encodeURIComponent(p.id)}`}
-                  className="rounded-lg border px-3 py-2 text-sm"
-                >
-                  Editar
-                </Link>
-              </div>
-            </li>
-          ))}
+                <div className="flex gap-2">
+                  <Link
+                    href={`/vendedor/produtos/${encodeURIComponent(p.id)}`}
+                    className="rounded-lg border px-3 py-2 text-sm"
+                  >
+                    Editar
+                  </Link>
+                </div>
+              </li>
+            );
+          })}
         </ul>
       )}
     </main>
