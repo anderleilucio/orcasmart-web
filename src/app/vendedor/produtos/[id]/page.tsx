@@ -126,9 +126,17 @@ export default function EditarProdutoPage() {
       const uploadedPaths: string[] = [];
 
       for (const f of Array.from(files)) {
-        const { url, path } = await uploadProductImageWithPath(f, u.uid);
-        uploadedUrls.push(url);
-        uploadedPaths.push(path);
+        // A função disponível é uploadProductImage. Ela pode retornar:
+        // - string (URL) ou
+        // - objeto { url, path }
+        const result: any = await uploadProductImage(f, u.uid);
+
+        if (typeof result === "string") {
+          uploadedUrls.push(result);
+        } else if (result && typeof result === "object") {
+          if (result.url) uploadedUrls.push(String(result.url));
+          if (result.path) uploadedPaths.push(String(result.path));
+        }
       }
 
       setUrls((prev) => {
@@ -137,7 +145,9 @@ export default function EditarProdutoPage() {
         return base ? `${base}\n${block}` : block;
       });
 
-      setImagePaths((prev) => [...prev, ...uploadedPaths]);
+      if (uploadedPaths.length) {
+        setImagePaths((prev) => [...prev, ...uploadedPaths]);
+      }
 
       setToast(`${uploadedUrls.length} imagem(ns) enviada(s).`);
       setTimeout(() => setToast(null), 2000);
@@ -167,11 +177,9 @@ export default function EditarProdutoPage() {
           .map((u) => u.trim())
           .filter(Boolean),
         active: ativo,
-        // categoryCode: manter se o backend fizer merge sem isto; envie se precisar atualizar.
       };
 
-      // Envie os paths quando houver (permite o backend persistir/limpar corretamente)
-      body.imageStoragePaths = imagePaths;
+      if (imagePaths.length) body.imageStoragePaths = imagePaths;
 
       const res = await fetch("/api/seller-products/upsert", {
         method: "POST",
