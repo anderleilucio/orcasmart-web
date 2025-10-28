@@ -1,6 +1,7 @@
 // src/app/vendedor/produtos/importar-csv/page.tsx
 "use client";
-
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
@@ -22,15 +23,27 @@ type Row = {
   imagens?: string | string[];
   imagem?: string;
   image?: string;
+  imageUrl?: string;
   categoryCode?: string;
   category?: string;
   categoria?: string;
 };
 
+type Canon = {
+  sku: string;
+  nome: string;
+  preco: string | number;
+  estoque: string | number;
+  ativo: boolean | string;
+  unidade: string;
+  imagens: string[];
+  categoryCode?: string;
+};
+
 function parseBool(v: any, def = true) {
   const s = String(v ?? "").trim().toLowerCase();
-  if (["false", "0", "nao", "não", "no", "n", "inativo"].includes(s)) return false;
-  if (["true", "1", "sim", "yes", "y", "ativo"].includes(s)) return true;
+  if (["false", "0", "nao", "não", "no", "n", "inativo", "inactive"].includes(s)) return false;
+  if (["true", "1", "sim", "yes", "y", "ativo", "active"].includes(s)) return true;
   return typeof v === "boolean" ? v : def;
 }
 
@@ -46,11 +59,11 @@ function parseNumBR(v: any, def = 0) {
 }
 
 function toArrayImages(anyVal: any): string[] {
-  if (Array.isArray(anyVal)) return anyVal.map(String).map(s => s.trim()).filter(Boolean);
+  if (Array.isArray(anyVal)) return anyVal.map(String).map((s) => s.trim()).filter(Boolean);
   if (typeof anyVal === "string") {
     return anyVal
       .split(/\n|;|,|\|/g)
-      .map(s => s.trim())
+      .map((s) => s.trim())
       .filter(Boolean);
   }
   return [];
@@ -59,8 +72,11 @@ function toArrayImages(anyVal: any): string[] {
 export default function ImportarCsvPage() {
   const router = useRouter();
   const [uid, setUid] = useState<string | null>(null);
-  const [rows, setRows] = useState<Row[]>([]);
-  const [valid, setValid] = useState<Row[]>([]);
+
+  // linhas brutas do CSV (apenas para contagem)
+  const [rowsTotal, setRowsTotal] = useState<number>(0);
+  // linhas normalizadas prontas para enviar ao backend
+  const [valid, setValid] = useState<Canon[]>([]);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -76,41 +92,66 @@ export default function ImportarCsvPage() {
 
   function handleFile(file: File) {
     setMsg(null);
+    setBusy(true);
     Papa.parse<Row>(file, {
       header: true,
       skipEmptyLines: "greedy",
+      transformHeader: (h) => String(h ?? "").trim(),
       complete: (res) => {
         const data = (res.data || []).map((r) => {
           const sku = String(r.sku ?? "").trim();
           const nome = String(r.nome ?? r.name ?? "").trim();
-          const preco = parseNumBR(r.preco ?? r.price, 0);
-          const estoque = parseNumBR(r.estoque ?? r.stock, 0);
+
+          // Mantemos número já normalizado (back aceita . ou ,)
+          const preco =
+            r.preco != null || r.price != null
+              ? (r.preco ?? r.price)!
+              : "0,00";
+          const estoque =
+            r.estoque != null || r.stock != null
+              ? (r.estoque ?? r.stock)!
+              : "0";
+
           const ativo = parseBool(r.ativo, true);
           const unidade = String((r as any).unidade ?? "un").trim() || "un";
-          const categoryCode =
-            String((r as any).categoryCode ?? (r as any).category ?? (r as any).categoria ?? "")
-              .trim() || undefined;
 
-          const imageUrls = toArrayImages(
-            (r as any).imagens ?? (r as any).images ?? (r as any).imagem ?? (r as any).image
+          const categoryCode =
+            String(
+              (r as any).categoryCode ??
+                (r as any).category ??
+                (r as any).categoria ??
+                ""
+            ).trim() || undefined;
+
+          const imgs = toArrayImages(
+            (r as any).imagens ??
+              (r as any).images ??
+              (r as any).imagem ??
+              (r as any).image ??
+              (r as any).imageUrl
           );
 
           return {
             sku,
-            name: nome,
-            price: preco,
-            stock: estoque,
-            active: ativo,
-            unit: unidade,
+            nome,
+            preco,
+            estoque,
+            ativo,
+            unidade,
+            imagens: imgs,
             categoryCode,
-            imageUrls,
-          } as any;
+          } as Canon;
         });
 
-        setRows(res.data);
-        setValid(data.filter((x: any) => x.sku && (x.name || "").trim()));
+        const filtered = data.filter((x) => x.sku && (x.nome || "").trim());
+        setRowsTotal(res.data?.length || 0);
+        setValid(filtered);
+        setBusy(false);
       },
-      error: (e) => setMsg(e?.message || "Falha ao ler CSV."),
+      error: (e) => {
+        setMsg(e?.message || "Falha ao ler CSV.");
+        setBusy(false);
+      },
       encoding: "utf-8",
     });
   }
@@ -122,6 +163,8 @@ export default function ImportarCsvPage() {
     setMsg(null);
     try {
       const token = await auth.currentUser?.getIdToken();
+
+      // 🔒 Envia no formato canônico que o backend já entende
       const res = await fetch("/api/products/import", {
         method: "POST",
         headers: {
@@ -130,9 +173,14 @@ export default function ImportarCsvPage() {
         },
         body: JSON.stringify({ items: valid }),
       });
+
       const j = await res.json().catch(() => ({}));
       if (!res.ok || j?.ok === false) throw new Error(j?.error || `HTTP ${res.status}`);
+
       setMsg(`Importação concluída. Itens processados: ${j?.upserted ?? validCount}.`);
+      // limpa após sucesso (opcional)
+      // setValid([]);
+      // setRowsTotal(0);
     } catch (e: any) {
       setMsg(e?.message || "Falha ao importar.");
     } finally {
@@ -140,9 +188,7 @@ export default function ImportarCsvPage() {
     }
   }
 
-  const preview = useMemo(() => {
-    return valid.slice(0, 20);
-  }, [valid]);
+  const preview = useMemo(() => valid.slice(0, 20), [valid]);
 
   if (!uid) return <main className="p-6">Carregando…</main>;
 
@@ -150,11 +196,14 @@ export default function ImportarCsvPage() {
     <main className="max-w-5xl mx-auto p-6 space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">Importar produtos (CSV)</h1>
-        <Link href="/vendedor/produtos" className="rounded-lg border px-3 py-1.5 text-sm">← Hub de produtos</Link>
+        <Link href="/vendedor/produtos" className="rounded-lg border px-3 py-1.5 text-sm">
+          ← Hub de produtos
+        </Link>
       </div>
 
       <p className="text-sm opacity-70">
-        Faça upload de um arquivo <code>.csv</code> com cabeçalhos: <strong>SKU, Nome, Preço, Estoque, Ativo, Unidade, Imagens</strong>.
+        Faça upload de um arquivo <code>.csv</code> com cabeçalhos:{" "}
+        <strong>SKU, Nome, Preço, Estoque, Ativo, Unidade, Imagens</strong>.
       </p>
 
       <div className="flex items-center gap-3">
@@ -177,7 +226,8 @@ export default function ImportarCsvPage() {
       )}
 
       <div className="text-sm">
-        Linhas válidas: <strong>{validCount}</strong> {rows.length ? `(de ${rows.length})` : null}
+        Linhas válidas: <strong>{validCount}</strong>
+        {rowsTotal ? ` (de ${rowsTotal})` : null}
       </div>
 
       {preview.length > 0 && (
@@ -195,21 +245,25 @@ export default function ImportarCsvPage() {
               </tr>
             </thead>
             <tbody>
-              {preview.map((r: any, i: number) => (
+              {preview.map((r, i) => (
                 <tr key={i} className="border-t">
                   <td className="p-2">{r.sku}</td>
-                  <td className="p-2">{r.name}</td>
+                  <td className="p-2">{r.nome}</td>
                   <td className="p-2 text-right">
-                    {Number(r.price ?? 0).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                    {Number(parseNumBR(r.preco)).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
                   </td>
-                  <td className="p-2 text-right">{r.stock ?? 0}</td>
-                  <td className="p-2">{r.active ? "sim" : "não"}</td>
-                  <td className="p-2">{r.unit || "un"}</td>
+                  <td className="p-2 text-right">
+                    {Number(parseNumBR(r.estoque)).toLocaleString("pt-BR")}
+                  </td>
+                  <td className="p-2">{parseBool(r.ativo, true) ? "sim" : "não"}</td>
+                  <td className="p-2">{r.unidade || "un"}</td>
                   <td className="p-2">
-                    {(r.imageUrls || []).slice(0, 2).map((u: string, k: number) => (
-                      <span key={k} className="mr-2 underline">{u.length > 28 ? u.slice(0, 28) + "…" : u}</span>
+                    {r.imagens.slice(0, 2).map((u, k) => (
+                      <span key={k} className="mr-2 underline">
+                        {u.length > 28 ? u.slice(0, 28) + "…" : u}
+                      </span>
                     ))}
-                    {(r.imageUrls || []).length > 2 ? "…" : null}
+                    {r.imagens.length > 2 ? "…" : null}
                   </td>
                 </tr>
               ))}
