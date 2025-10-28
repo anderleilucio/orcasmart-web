@@ -76,13 +76,24 @@ export default function ProdutosPage() {
 
   async function fetchProducts(uid: string) {
     const token = await auth.currentUser?.getIdToken();
-    const url = `/api/products?ownerId=${encodeURIComponent(uid)}&limit=200&_=${Date.now()}`;
+  
+    const url = `/api/seller-products/list?sellerId=${encodeURIComponent(uid)}&_=${Date.now()}`;
+  
     const res = await fetch(url, {
-      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      method: "GET",
       cache: "no-store",
+      headers: {
+        "Cache-Control": "no-store",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      next: { revalidate: 0 },
     });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body?.error ?? `HTTP ${res.status}`);
+  
+    const body: any = await res.json().catch(() => ({}));
+    if (!res.ok || body?.ok === false) {
+      throw new Error(body?.error ?? `HTTP ${res.status}`);
+    }
+  
     const listRaw: any[] = Array.isArray(body.items) ? body.items : [];
     return listRaw.map(normalizeApiItem);
   }
