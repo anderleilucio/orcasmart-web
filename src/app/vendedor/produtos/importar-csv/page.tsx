@@ -46,10 +46,7 @@ function parseNumBR(v: any, def = 0): number {
 }
 
 function toImages(val: any): string[] {
-  const raw =
-    Array.isArray(val) ? val :
-    typeof val === "string" ? val :
-    "";
+  const raw = Array.isArray(val) ? val : typeof val === "string" ? val : "";
   const list = Array.isArray(raw)
     ? raw
     : String(raw)
@@ -62,7 +59,7 @@ function toImages(val: any): string[] {
 function headerKey(s: string): string {
   // Normaliza cabeçalhos: remove BOM, acentos, espaços e deixa lowercase
   return s
-    .replace(/\ufeff/g, "") // 🧹 remove caractere BOM (UTF-8 com BOM)
+    .replace(/\ufeff/g, "") // remove BOM
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/\s+/g, "")
@@ -70,7 +67,7 @@ function headerKey(s: string): string {
 }
 
 function normalizeRow(r: CsvRow): NormalizedRow | null {
-  // Mapear campos por aliases
+  // Mapear campos por aliases normalizados
   const map: Record<string, any> = {};
   for (const [k, v] of Object.entries(r)) {
     map[headerKey(k)] = v;
@@ -84,14 +81,17 @@ function normalizeRow(r: CsvRow): NormalizedRow | null {
   const stock = parseNumBR(map["estoque"] ?? map["stock"], 0);
   const active = parseBool(map["ativo"] ?? map["active"], true);
   const unit = (String(map["unidade"] ?? map["unit"] ?? "un").trim() || "un");
-  const categoryCode = String(map["categorycode"] ?? map["category"] ?? map["categoria"] ?? "")
-    .trim() || undefined;
+  const categoryCode =
+    (String(map["categorycode"] ?? map["category"] ?? map["categoria"] ?? "").trim() ||
+      undefined);
 
+  // Agora também aceita imageUrl, imageURL e "image url" (todos viram "imageurl" após headerKey)
   const imageUrls = toImages(
     map["imagens"] ??
-    map["images"] ??
-    map["imagem"] ??
-    map["image"]
+      map["images"] ??
+      map["imagem"] ??
+      map["image"] ??
+      map["imageurl"] // 👈 cobre imageUrl / imageURL / "image url"
   );
 
   return { sku, name, price, stock, active, unit, imageUrls, categoryCode };
@@ -117,7 +117,6 @@ function parseCsvFile(file: File): Promise<ParseResult<CsvRow>> {
     // Se veio 1 campo só e parece “SKU;Nome;…”, reparse com ';'
     const fields = (res.meta.fields || []).map((f) => String(f));
     if (fields.length <= 1) {
-      // Reparse com ';'
       res = await attempt({ encoding: "utf-8", delimiter: ";" });
     }
 
@@ -158,7 +157,6 @@ export default function ImportarCsvPage() {
     setBusy(true);
     try {
       const parsed = await parseCsvFile(f);
-
       const data = (parsed.data || []) as CsvRow[];
 
       // Normaliza cada linha e descarta inválidas (SKU/Nome faltando)
@@ -173,7 +171,7 @@ export default function ImportarCsvPage() {
 
       if (!normalized.length) {
         setMsg(
-          "Nenhuma linha válida encontrada. Verifique os cabeçalhos (SKU, Nome, Preço/Preco, Estoque, Ativo, Unidade, Imagens) e o separador (vírgula ou ponto e vírgula)."
+          "Nenhuma linha válida encontrada. Verifique os cabeçalhos (SKU, Nome, Preço/Preco, Estoque, Ativo, Unidade, Imagens/ImageUrl) e o separador (vírgula ou ponto e vírgula)."
         );
       }
     } catch (e: any) {
@@ -201,7 +199,13 @@ export default function ImportarCsvPage() {
       });
       const j = await res.json().catch(() => ({}));
       if (!res.ok || j?.ok === false) throw new Error(j?.error || `HTTP ${res.status}`);
-      setMsg(`✅ Importação concluída. Itens processados: ${j?.upserted ?? validRows.length}.`);
+
+      const processed =
+        j?.summary?.total ??
+        j?.upserted ??
+        validRows.length;
+
+      setMsg(`✅ Importação concluída. Itens processados: ${processed}.`);
     } catch (e: any) {
       setMsg(e?.message || "Falha ao importar.");
     } finally {
@@ -224,7 +228,7 @@ export default function ImportarCsvPage() {
 
       <p className="text-sm opacity-70">
         Faça upload de um arquivo <code>.csv</code> com cabeçalhos:
-        <strong> SKU, Nome, Preço/Preco, Estoque, Ativo, Unidade, Imagens</strong>.
+        <strong> SKU, Nome, Preço/Preco, Estoque, Ativo, Unidade, Imagens/ImageUrl</strong>.
         Aceita vírgula <code>,</code> ou ponto e vírgula <code>;</code>.
       </p>
 

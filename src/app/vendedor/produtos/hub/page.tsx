@@ -1,7 +1,8 @@
 // src/app/vendedor/produtos/hub/page.tsx
 import Link from "next/link";
+import type { Metadata } from "next";
 
-export const metadata = {
+export const metadata: Metadata = {
   title: "Produtos — Hub | OrcaSmart",
 };
 
@@ -11,7 +12,8 @@ export default function ProdutosHubPage() {
       title: "Gerar CSV (Fotos & URLs)",
       desc:
         "Selecione fotos e/ou cole URLs. Sugerimos categoria e prefixo do SKU automaticamente (ex.: ELE-, INS-).",
-      href: "/vendedor/imagens",
+      // ✅ vai para a página de gerar CSV a partir de imagens/URLs
+      href: "/vendedor/produtos/importar",
       icon: (
         <svg
           viewBox="0 0 24 24"
@@ -30,8 +32,8 @@ export default function ProdutosHubPage() {
       title: "Importar CSV para cadastrar",
       desc:
         "Envie um arquivo CSV (SKU, Nome, Preço, Estoque, etc.) e cadastre seus produtos automaticamente no catálogo.",
-      // ✅ corrigido: caminho exato da página de importação
-      href: "/vendedor/produtos/importar",
+      // ✅ página correta do importador de CSV
+      href: "/vendedor/produtos/importar-csv",
       icon: (
         <svg
           viewBox="0 0 24 24"
@@ -86,7 +88,7 @@ export default function ProdutosHubPage() {
     {
       title: "Exportar catálogo (CSV)",
       desc: "Baixe seu catálogo completo no formato compatível com o import.",
-      href: "/dev/export",
+      href: "/dev/export", // ajuste aqui se tiver outra rota
       icon: (
         <svg
           viewBox="0 0 24 24"
@@ -106,7 +108,7 @@ export default function ProdutosHubPage() {
       title: "Regras de categorização (HUB)",
       desc:
         "Cadastre aliases por categoria (ex.: “cabo 3mm” em Elétrica). Suas sugestões terão prioridade.",
-      href: "/vendedor/hub/categorizacao",
+      href: "/vendedor/produtos/hub/regras", // ✅ caminho dentro de /hub
       icon: (
         <svg
           viewBox="0 0 24 24"
@@ -125,7 +127,7 @@ export default function ProdutosHubPage() {
       ),
       cta: "Abrir regras",
     },
-  ];
+  ] as const;
 
   return (
     <div className="px-6 py-6 space-y-6">
@@ -162,9 +164,7 @@ export default function ProdutosHubPage() {
 
       <div className="text-xs text-gray-500">
         Dica: você pode apontar o menu lateral “Produtos” para{" "}
-        <code className="px-1 py-0.5 bg-gray-100 rounded">
-          /vendedor/produtos/hub
-        </code>{" "}
+        <code className="px-1 py-0.5 bg-gray-100 rounded">/vendedor/produtos/hub</code>{" "}
         sem alterar suas páginas atuais.
       </div>
     </div>
