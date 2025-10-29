@@ -1,4 +1,3 @@
-// src/app/vendedor/produtos/importar-csv/page.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
@@ -57,7 +56,6 @@ function toImages(val: any): string[] {
 }
 
 function headerKey(s: string): string {
-  // Normaliza cabeçalhos: remove BOM, acentos, espaços e deixa lowercase
   return s
     .replace(/\ufeff/g, "") // remove BOM
     .normalize("NFD")
@@ -67,11 +65,8 @@ function headerKey(s: string): string {
 }
 
 function normalizeRow(r: CsvRow): NormalizedRow | null {
-  // Mapear campos por aliases normalizados
   const map: Record<string, any> = {};
-  for (const [k, v] of Object.entries(r)) {
-    map[headerKey(k)] = v;
-  }
+  for (const [k, v] of Object.entries(r)) map[headerKey(k)] = v;
 
   const sku = String(map["sku"] ?? "").trim();
   const name = String(map["nome"] ?? map["name"] ?? "").trim();
@@ -82,16 +77,15 @@ function normalizeRow(r: CsvRow): NormalizedRow | null {
   const active = parseBool(map["ativo"] ?? map["active"], true);
   const unit = (String(map["unidade"] ?? map["unit"] ?? "un").trim() || "un");
   const categoryCode =
-    (String(map["categorycode"] ?? map["category"] ?? map["categoria"] ?? "").trim() ||
-      undefined);
+    (String(map["categorycode"] ?? map["category"] ?? map["categoria"] ?? "").trim() || undefined);
 
-  // Agora também aceita imageUrl, imageURL e "image url" (todos viram "imageurl" após headerKey)
+  // aceita imagens em vários nomes; "image url" e variações viram "imageurl"
   const imageUrls = toImages(
     map["imagens"] ??
       map["images"] ??
       map["imagem"] ??
       map["image"] ??
-      map["imageurl"] // 👈 cobre imageUrl / imageURL / "image url"
+      map["imageurl"]
   );
 
   return { sku, name, price, stock, active, unit, imageUrls, categoryCode };
@@ -111,25 +105,16 @@ function parseCsvFile(file: File): Promise<ParseResult<CsvRow>> {
     });
 
   return (async () => {
-    // 1) Tentativa padrão: UTF-8, autodetect delimiter
     let res = await attempt({ encoding: "utf-8" });
+    const fields = (res.meta.fields || []).map(String);
+    if (fields.length <= 1) res = await attempt({ encoding: "utf-8", delimiter: ";" });
 
-    // Se veio 1 campo só e parece “SKU;Nome;…”, reparse com ';'
-    const fields = (res.meta.fields || []).map((f) => String(f));
-    if (fields.length <= 1) {
-      res = await attempt({ encoding: "utf-8", delimiter: ";" });
-    }
-
-    // Se ainda falhar (campos 1), tenta fallback de encoding ISO-8859-1
-    const fields2 = (res.meta.fields || []).map((f) => String(f));
+    const fields2 = (res.meta.fields || []).map(String);
     if (fields2.length <= 1) {
       res = await attempt({ encoding: "ISO-8859-1" });
-      const fields3 = (res.meta.fields || []).map((f) => String(f));
-      if (fields3.length <= 1) {
-        res = await attempt({ encoding: "ISO-8859-1", delimiter: ";" });
-      }
+      const fields3 = (res.meta.fields || []).map(String);
+      if (fields3.length <= 1) res = await attempt({ encoding: "ISO-8859-1", delimiter: ";" });
     }
-
     return res;
   })();
 }
@@ -159,7 +144,6 @@ export default function ImportarCsvPage() {
       const parsed = await parseCsvFile(f);
       const data = (parsed.data || []) as CsvRow[];
 
-      // Normaliza cada linha e descarta inválidas (SKU/Nome faltando)
       const normalized: NormalizedRow[] = [];
       for (const r of data) {
         const n = normalizeRow(r);
@@ -200,11 +184,7 @@ export default function ImportarCsvPage() {
       const j = await res.json().catch(() => ({}));
       if (!res.ok || j?.ok === false) throw new Error(j?.error || `HTTP ${res.status}`);
 
-      const processed =
-        j?.summary?.total ??
-        j?.upserted ??
-        validRows.length;
-
+      const processed = j?.summary?.total ?? j?.upserted ?? validRows.length;
       setMsg(`✅ Importação concluída. Itens processados: ${processed}.`);
     } catch (e: any) {
       setMsg(e?.message || "Falha ao importar.");
@@ -221,7 +201,7 @@ export default function ImportarCsvPage() {
     <main className="max-w-5xl mx-auto p-6 space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">Importar produtos (CSV)</h1>
-        <Link href="/vendedor/produtos" className="rounded-lg border px-3 py-1.5 text-sm">
+        <Link href="/vendedor/produtos/hub" className="rounded-lg border px-3 py-1.5 text-sm">
           ← Hub de produtos
         </Link>
       </div>
@@ -252,9 +232,7 @@ export default function ImportarCsvPage() {
         {rawRows.length ? <> (de {rawRows.length})</> : null}
       </div>
 
-      {msg && (
-        <div className="rounded-lg border px-4 py-3 text-sm">{msg}</div>
-      )}
+      {msg && <div className="rounded-lg border px-4 py-3 text-sm">{msg}</div>}
 
       {preview.length > 0 && (
         <div className="overflow-x-auto rounded-lg border">

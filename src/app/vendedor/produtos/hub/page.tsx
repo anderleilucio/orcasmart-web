@@ -1,4 +1,3 @@
-// src/app/vendedor/produtos/hub/page.tsx
 import Link from "next/link";
 import type { Metadata } from "next";
 
@@ -12,16 +11,9 @@ export default function ProdutosHubPage() {
       title: "Gerar CSV (Fotos & URLs)",
       desc:
         "Selecione fotos e/ou cole URLs. Sugerimos categoria e prefixo do SKU automaticamente (ex.: ELE-, INS-).",
-      // ✅ vai para a página de gerar CSV a partir de imagens/URLs
-      href: "/vendedor/produtos/importar",
+      href: "/vendedor/produtos/importar", // gerador a partir de imagens/URLs
       icon: (
-        <svg
-          viewBox="0 0 24 24"
-          className="w-6 h-6"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.8"
-        >
+        <svg viewBox="0 0 24 24" className="w-6 h-6" fill="none" stroke="currentColor" strokeWidth="1.8">
           <path d="M4 4h16v12H4z" />
           <path d="M4 16l4-4 3 3 5-5 4 4" />
         </svg>
@@ -32,16 +24,9 @@ export default function ProdutosHubPage() {
       title: "Importar CSV para cadastrar",
       desc:
         "Envie um arquivo CSV (SKU, Nome, Preço, Estoque, etc.) e cadastre seus produtos automaticamente no catálogo.",
-      // ✅ página correta do importador de CSV
       href: "/vendedor/produtos/importar-csv",
       icon: (
-        <svg
-          viewBox="0 0 24 24"
-          className="w-6 h-6"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.8"
-        >
+        <svg viewBox="0 0 24 24" className="w-6 h-6" fill="none" stroke="currentColor" strokeWidth="1.8">
           <path d="M12 3v12" />
           <path d="M7 10l5 5 5-5" />
           <path d="M4 19h16" />
@@ -54,13 +39,7 @@ export default function ProdutosHubPage() {
       desc: "Inclua um novo produto preenchendo os campos manualmente.",
       href: "/vendedor/produtos/novo",
       icon: (
-        <svg
-          viewBox="0 0 24 24"
-          className="w-6 h-6"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.8"
-        >
+        <svg viewBox="0 0 24 24" className="w-6 h-6" fill="none" stroke="currentColor" strokeWidth="1.8">
           <path d="M12 5v14" />
           <path d="M5 12h14" />
         </svg>
@@ -72,13 +51,7 @@ export default function ProdutosHubPage() {
       desc: "Busque, filtre, ordene e edite seus produtos já cadastrados.",
       href: "/vendedor/produtos",
       icon: (
-        <svg
-          viewBox="0 0 24 24"
-          className="w-6 h-6"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.8"
-        >
+        <svg viewBox="0 0 24 24" className="w-6 h-6" fill="none" stroke="currentColor" strokeWidth="1.8">
           <rect x="3" y="4" width="18" height="6" rx="1" />
           <rect x="3" y="14" width="18" height="6" rx="1" />
         </svg>
@@ -88,15 +61,9 @@ export default function ProdutosHubPage() {
     {
       title: "Exportar catálogo (CSV)",
       desc: "Baixe seu catálogo completo no formato compatível com o import.",
-      href: "/dev/export", // ajuste aqui se tiver outra rota
+      href: "/dev/export",
       icon: (
-        <svg
-          viewBox="0 0 24 24"
-          className="w-6 h-6"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.8"
-        >
+        <svg viewBox="0 0 24 24" className="w-6 h-6" fill="none" stroke="currentColor" strokeWidth="1.8">
           <path d="M12 3v12" />
           <path d="M7 10l5 5 5-5" />
           <path d="M4 19h16" />
@@ -108,15 +75,9 @@ export default function ProdutosHubPage() {
       title: "Regras de categorização (HUB)",
       desc:
         "Cadastre aliases por categoria (ex.: “cabo 3mm” em Elétrica). Suas sugestões terão prioridade.",
-      href: "/vendedor/produtos/hub/regras", // ✅ caminho dentro de /hub
+      href: "/vendedor/produtos/hub/regras",
       icon: (
-        <svg
-          viewBox="0 0 24 24"
-          className="w-6 h-6"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.8"
-        >
+        <svg viewBox="0 0 24 24" className="w-6 h-6" fill="none" stroke="currentColor" strokeWidth="1.8">
           <path d="M4 7h16" />
           <path d="M4 12h16" />
           <path d="M4 17h16" />
