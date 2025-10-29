@@ -22,13 +22,24 @@ function toNum(v: any, d = 0): number {
 }
 
 function normItem(docId: string, raw: any) {
-  const imageUrls: string[] = Array.isArray(raw.imageUrls)
-    ? raw.imageUrls.filter((u: any) => typeof u === "string" && u)
+  // normaliza lista de urls
+  const arr: string[] = Array.isArray(raw.imageUrls)
+    ? raw.imageUrls
     : Array.isArray(raw.images)
-    ? raw.images.filter((u: any) => typeof u === "string" && u)
+    ? raw.images
     : typeof raw.image === "string" && raw.image
     ? [raw.image]
     : [];
+
+  const imageUrls = arr
+    .filter((u: any) => typeof u === "string" && u.trim())
+    .map((u) => u.trim());
+
+  // garante 'image' e fallback para imageUrls[0]
+  const image: string | undefined =
+    (typeof raw.image === "string" && raw.image.trim()) ||
+    imageUrls[0] ||
+    undefined;
 
   const active =
     typeof raw.active === "boolean"
@@ -46,7 +57,8 @@ function normItem(docId: string, raw: any) {
     price: toNum(raw.price ?? raw.preco, 0),
     stock: toNum(raw.stock ?? raw.estoque, 0),
     active,
-    imageUrls,
+    image,        // ✅ agora incluído
+    imageUrls,    // ✅ lista normalizada
     categoryCode,
     ownerId: raw.ownerId ?? raw.sellerId ?? raw.vendorUid ?? null,
     sellerId: raw.sellerId ?? raw.ownerId ?? raw.vendorUid ?? null,
@@ -54,7 +66,11 @@ function normItem(docId: string, raw: any) {
   };
 }
 
-async function queryByOwner(col: string, sellerId: string, field: "ownerId" | "vendorUid" | "sellerId") {
+async function queryByOwner(
+  col: string,
+  sellerId: string,
+  field: "ownerId" | "vendorUid" | "sellerId"
+) {
   const snap = await adminDb.collection(col).where(field, "==", sellerId).get();
   return snap.docs.map((d) => ({ id: d.id, ...d.data(), _src: col }));
 }
@@ -69,7 +85,9 @@ export async function GET(req: NextRequest) {
       try {
         const decoded = await adminAuth.verifyIdToken(m[1]);
         uidFromToken = decoded.uid;
-      } catch {/* ignore */}
+      } catch {
+        /* ignore */
+      }
     }
 
     const url = new URL(req.url);
@@ -79,20 +97,23 @@ export async function GET(req: NextRequest) {
 
     // filtros opcionais
     const activeParam = url.searchParams.get("active");
-    const categoryParam = (url.searchParams.get("category") || url.searchParams.get("categoryCode") || "").trim() || null;
+    const categoryParam =
+      (url.searchParams.get("category") ||
+        url.searchParams.get("categoryCode") ||
+        "").trim() || null;
 
     const results = await Promise.all([
       // products (preferido)
       queryByOwner("products", sellerId, "ownerId"),
       queryByOwner("products", sellerId, "vendorUid"),
       queryByOwner("products", sellerId, "sellerId"),
-      // seller_products (legado)
+      // seller_products (espelho)
       queryByOwner("seller_products", sellerId, "ownerId"),
       queryByOwner("seller_products", sellerId, "vendorUid"),
       queryByOwner("seller_products", sellerId, "sellerId"),
     ]);
 
-    // mesclar e deduplicar
+    // mesclar e deduplicar (primeiro que entra vence: products vem antes)
     const mergedByDoc = new Map<string, any>();
     for (const bucket of results) {
       for (const item of bucket) {
@@ -101,11 +122,14 @@ export async function GET(req: NextRequest) {
     }
 
     // normalizar
-    let items = Array.from(mergedByDoc.entries()).map(([id, raw]) => normItem(id, raw));
+    let items = Array.from(mergedByDoc.entries()).map(([id, raw]) =>
+      normItem(id, raw)
+    );
 
     // filtros na memória (compat)
     if (activeParam === "true") items = items.filter((x) => x.active === true);
-    else if (activeParam === "false") items = items.filter((x) => x.active === false);
+    else if (activeParam === "false")
+      items = items.filter((x) => x.active === false);
 
     if (categoryParam) {
       items = items.filter(

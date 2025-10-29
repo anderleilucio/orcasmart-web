@@ -41,34 +41,26 @@ function toInt(v: any, def = 0): number {
   return Number.isFinite(n) ? Math.trunc(n) : def;
 }
 
-/** Normaliza campos de imagem aceitando:
- *  - imagens/imagens[]/images/images[]/imagem/image/imageUrl (string ou array)
- *  - separadores: \n ; , |
- *  Retorna imageUrls único + image = imageUrls[0] (espelho).
- */
-function parseImages(anyVal: any): { image: string; imageUrls: string[] } {
-  const asString = (x: any) => (typeof x === "string" ? x.trim() : "");
-  const arr =
-    Array.isArray(anyVal?.imagens) ? anyVal.imagens :
-    Array.isArray(anyVal?.images)  ? anyVal.images  :
-    typeof anyVal?.imagens === "string" ? anyVal.imagens :
-    typeof anyVal?.images  === "string" ? anyVal.images  :
-    typeof anyVal?.imagem  === "string" ? anyVal.imagem  :
-    typeof anyVal?.image   === "string" ? anyVal.image   :
-    typeof anyVal?.imageUrl=== "string" ? anyVal.imageUrl: "";
+/** Lê campos de imagem de vários nomes/formatos. */
+function parseImages(src: any): { image?: string; imageUrls?: string[] } {
+  const candidate =
+    src?.imageUrls ?? src?.imageurls ??
+    src?.imagens ?? src?.images ??
+    src?.imagem ?? src?.image ?? src?.imageUrl ?? "";
 
-  const pieces = Array.isArray(arr)
-    ? arr.map(asString)
-    : String(arr ?? "")
+  const list = Array.isArray(candidate)
+    ? candidate
+    : String(candidate ?? "")
         .split(/\n|;|,|\|/g)
-        .map((s) => s.trim());
+        .map((s) => s.trim())
+        .filter(Boolean);
 
-  const imageUrls = Array.from(new Set(pieces.filter(Boolean)));
-  const image = imageUrls[0] ?? "";
-  return { image, imageUrls };
+  const imageUrls = Array.from(new Set(list)).map(String);
+  if (!imageUrls.length) return {}; // <<< importante: não retornar vazio (evita sobrescrever)
+  return { image: imageUrls[0], imageUrls };
 }
 
-/** Converte um "row" do CSV/JSON para o formato comum do produto */
+/** Converte um row do CSV/JSON para formato comum */
 function normalizeRow(raw: any) {
   const sku = String(raw.sku ?? raw.SKU ?? raw.Sku ?? "").trim();
   const name = String(raw.name ?? raw.nome ?? raw.Nome ?? "").trim();
@@ -82,17 +74,13 @@ function normalizeRow(raw: any) {
   if (typeof categoryCode === "string") categoryCode = categoryCode.trim();
   if (!categoryCode || categoryCode === "-") categoryCode = null;
 
-  const { image, imageUrls } = parseImages({
-    imagens: raw.imagens ?? raw.Imagens ?? raw.images ?? raw.Images,
-    imagem: raw.imagem ?? raw.Imagem,
-    image: raw.image,
-    imageUrl: raw["image url"] ?? raw.imageUrl,
-  });
+  // pode vir em qualquer chave (inclui imageUrls)
+  const images = parseImages(raw);
 
-  return { sku, name, price, stock, active, unit, categoryCode, image, imageUrls };
+  return { sku, name, price, stock, active, unit, categoryCode, ...images };
 }
 
-/** quebra segura para batches (500 writes máx). Usamos 400 por folga. */
+/** chunks para batch */
 function chunk<T>(arr: T[], size = 400): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
@@ -141,7 +129,7 @@ export async function POST(req: NextRequest) {
 
     const docIds = normalized.map((p) => `${sellerId}__${p.sku}`);
 
-    // Descobrir quais já existem em /products
+    // existentes em /products
     const existingSnaps = await adminDb.getAll(...docIds.map((id) => productsCol.doc(id)));
     const existsMap = new Map<string, boolean>();
     existingSnaps.forEach((snap) => existsMap.set(snap.id, snap.exists));
@@ -149,7 +137,6 @@ export async function POST(req: NextRequest) {
     let totalCreated = 0;
     let totalUpdated = 0;
 
-    // Map auxiliar para O(1)
     const byId = new Map<string, typeof normalized[number]>();
     normalized.forEach((p, i) => byId.set(docIds[i], p));
 
@@ -160,7 +147,8 @@ export async function POST(req: NextRequest) {
       for (const id of idsChunk) {
         const p = byId.get(id)!;
 
-        const baseData = {
+        // base sem imagens
+        const baseData: any = {
           sellerId,
           ownerId: sellerId,
           vendorUid: sellerId,
@@ -171,25 +159,28 @@ export async function POST(req: NextRequest) {
           stock: Number(p.stock ?? 0),
           active: p.active !== false,
           unit: p.unit,
-          // 👇 imagens normalizadas
-          image: p.image,
-          imageUrls: p.imageUrls,
           updatedAt: now as any,
         };
 
+        // ✅ só aplica imagens se o CSV trouxer (não sobrescreve com vazio)
+        if (p.imageUrls && p.imageUrls.length) {
+          baseData.image = p.image ?? p.imageUrls[0];
+          baseData.imageUrls = p.imageUrls;
+        }
+
         const exists = existsMap.get(id);
-        if (exists) totalUpdated++;
-        else totalCreated++;
+        if (exists) totalUpdated++; else totalCreated++;
 
-        // products
         const prodRef = productsCol.doc(id);
-        if (exists) batchProducts.set(prodRef, baseData, { merge: true });
-        else batchProducts.set(prodRef, { ...baseData, createdAt: now as any }, { merge: true });
+        const sellerRef = adminDb.collection("seller_products").doc(id);
 
-        // seller_products (espelho)
-        const sellerRef = sellerCol.doc(id);
-        if (exists) batchSeller.set(sellerRef, baseData, { merge: true });
-        else batchSeller.set(sellerRef, { ...baseData, createdAt: now as any }, { merge: true });
+        if (exists) {
+          batchProducts.set(prodRef, baseData, { merge: true });
+          batchSeller.set(sellerRef, baseData, { merge: true });
+        } else {
+          batchProducts.set(prodRef, { ...baseData, createdAt: now as any }, { merge: true });
+          batchSeller.set(sellerRef, { ...baseData, createdAt: now as any }, { merge: true });
+        }
       }
 
       await batchProducts.commit();
@@ -198,7 +189,7 @@ export async function POST(req: NextRequest) {
 
     const durationMs = Date.now() - startedAt;
 
-    // 5) Log de importação
+    // 5) Log
     await adminDb.collection("import_logs").add({
       sellerId,
       count_total: normalized.length,
@@ -212,12 +203,7 @@ export async function POST(req: NextRequest) {
     return noStore({
       ok: true,
       sellerId,
-      summary: {
-        total: normalized.length,
-        created: totalCreated,
-        updated: totalUpdated,
-        skipped: 0,
-      },
+      summary: { total: normalized.length, created: totalCreated, updated: totalUpdated, skipped: 0 },
     });
   } catch (err: any) {
     return noStore({ ok: false, error: err?.message || "Erro interno" }, 500);
